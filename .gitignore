@@ -1,0 +1,22 @@
+# Environment / secrets — NEVER commit your token
+.env
+*.env
+secrets.py
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Node
+node_modules/
+package-lock.json
+
+# OS junk
+.DS_Store
+Thumbs.db
