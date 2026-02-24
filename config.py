@@ -1,0 +1,26 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ---------------------------------------------------------------------------
+# Discord
+# ---------------------------------------------------------------------------
+DISCORD_TOKEN: str = os.getenv("DISCORD_TOKEN", "")
+COMMAND_PREFIX: str = "!"
+
+# Channel IDs for scheduled pushes (set in .env)
+ALERT_CHANNEL_ID: int = int(os.getenv("ALERT_CHANNEL_ID", 0))
+MARKET_CHANNEL_ID: int = int(os.getenv("MARKET_CHANNEL_ID", 0))
+
+# ---------------------------------------------------------------------------
+# External APIs
+# ---------------------------------------------------------------------------
+NEWS_API_KEY: str = os.getenv("NEWS_API_KEY", "")
+OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+
+# ---------------------------------------------------------------------------
+# Misc
+# ---------------------------------------------------------------------------
+DATA_FOOTER: str = "Data via Yahoo Finance  |  prices may be delayed up to 15 min"
