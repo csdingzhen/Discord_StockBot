@@ -3,10 +3,11 @@ import discord
 from discord.ext import commands
 import yfinance as yf
 from datetime import datetime
-
+from dotenv import load_dotenv
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")  # export DISCORD_TOKEN="your-token-here"
 
 intents = discord.Intents.default()
