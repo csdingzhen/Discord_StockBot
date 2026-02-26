@@ -14,6 +14,7 @@ from datetime import time, date
 
 import pytz
 import pandas_market_calendars as mcal
+import requests
 
 import config
 from services.market_data import get_ticker_info
@@ -49,6 +50,29 @@ def is_early_close_today() -> bool:
     close_et = row["market_close"].astimezone(ET)
     return close_et.hour < _NORMAL_CLOSE_HOUR
 
+# ------------------------------------------------------------------
+# CNN Fear and Greed
+# ------------------------------------------------------------------
+def fetch_fear_and_greedy():
+    """Return the score and rating of CNN fear and greedy index"""
+    url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Referer': 'https://www.cnn.com/',
+        'Origin': 'https://www.cnn.com',
+    }
+    try:
+        response = requests.get(url, headers=headers)
+        data = response.json()
+    except Exception:
+        data = None
+    if not data:
+        return 'Information Not Available'
+    else:
+        score = data['fear_and_greed']['score']
+        rating = data['fear_and_greed']['rating']
+        return score, rating
 
 # ------------------------------------------------------------------
 # Cog
@@ -91,8 +115,21 @@ class Scheduler(commands.Cog):
                 lines.append(f"**{label}**  {icon} {price:,.2f}  ({sign}{pct:.2f}%)")
             else:
                 lines.append(f"**{label}** \u2014 unavailable")
+        fear_and_greed = fetch_fear_and_greedy()
+        lines.append(f"**CNN Fear & Greed Index** {fear_and_greed[0]:,.2f} {fear_and_greed[1]}")
         embed.description = "\n".join(lines)
         await channel.send(embed=embed)
+
+    # ------------------------------------------------------------------
+    # Dev: manual trigger for testing
+    # ------------------------------------------------------------------
+
+    @commands.command(name="marketsummary", hidden=True)
+    @commands.is_owner()
+    async def force_market_summary(self, ctx):
+        """Owner-only: manually fire the market summary right now."""
+        await self._send_summary()
+        await ctx.send("Market summary sent.", delete_after=5)
 
     # ------------------------------------------------------------------
     # Normal close: 4:05 PM ET
