@@ -58,12 +58,63 @@ COMMODITY_TICKERS = {
 
 # ---------------------------------------------------------------------------
 # Macro proxies available on yfinance
+# NOTE: ^IRX is the 13-Week T-Bill rate, NOT the 2-Year Treasury yield.
+#       Use FRED series DGS2 for the actual 2Y yield (see MACRO_DASHBOARD_FRED).
 # ---------------------------------------------------------------------------
 MACRO_TICKERS = {
     "10Y Treasury Yield": "^TNX",
-    "2Y Treasury Yield":  "^IRX",
+    "13W T-Bill":         "^IRX",   # was mislabelled "2Y Treasury Yield" — ^IRX is 13-week
     "US Dollar Index":    "DX-Y.NYB",
     "Gold (macro proxy)": "GC=F",
+}
+
+# ---------------------------------------------------------------------------
+# Macro dashboard — multi-source ticker definitions
+# ---------------------------------------------------------------------------
+
+# yfinance tickers
+MACRO_DASHBOARD_YFINANCE = {
+    "BTC":    "BTC-USD",
+    "Gold":   "GC=F",
+    "Silver": "SI=F",
+    "WTI":    "CL=F",
+    "DXY":    "DX-Y.NYB",
+    "VIX":    "^VIX",
+    "USDCNH": "USDCNH=X",
+    "US10Y":  "^TNX",
+}
+
+# FRED series (fetched via pandas_datareader)
+MACRO_DASHBOARD_FRED = {
+    "US2Y":        "DGS2",       # 2-Year Treasury yield (daily)
+    "TIPS10Y":     "DFII10",     # 10-Year TIPS real yield (daily)
+    "RRP":         "RRPONTSYD",  # Fed overnight reverse repo outstanding ($B, daily)
+    "Spread10Y2Y": "T10Y2Y",     # 10Y minus 2Y spread, pre-computed by FRED (daily)
+}
+
+# Stooq tickers
+MACRO_DASHBOARD_STOOQ = {
+    "JP10Y": "10yjpy.b",  # Japan 10-Year Government Bond yield
+}
+
+# Bilingual display labels for each macro item key
+MACRO_ITEM_LABELS = {
+    "BTC":         "比特币 BTC",
+    "Gold":        "黄金 Gold",
+    "Silver":      "白银 Silver",
+    "WTI":         "原油 WTI",
+    "GoldSilver":  "金银比 Gold/Silver",
+    "GoldOil":     "金油比 Gold/Oil",
+    "TIPS10Y":     "10Y TIPS 真实利率",
+    "RRP":         "Fed 逆回购 RRP",
+    "US10Y":       "美债 10Y",
+    "US2Y":        "美债 2Y",
+    "JP10Y":       "日债 10Y JGB",
+    "USJPSpread":  "美日利差 US-JP",
+    "Spread10Y2Y": "10Y-2Y 利差",
+    "DXY":         "美元指数 DXY",
+    "VIX":         "VIX 恐慌指数",
+    "USDCNH":      "USD/CNH 离岸人民币",
 }
 
 # ---------------------------------------------------------------------------
