@@ -8,21 +8,33 @@ Fires after NYSE close:
 
 Set MARKET_CHANNEL_ID in .env to enable.
 """
+import asyncio
+
 import discord
+import requests
 from discord.ext import commands, tasks
 from datetime import time, date
 
 import pytz
 import pandas_market_calendars as mcal
-import requests
 
 import config
 from services.market_data import get_ticker_info
+from services.premarket_data import fetch_premarket_snapshot, build_data_summary
+from services.llm_client import analyze_premarket
 from utils.formatters import change_emoji, make_embed
-from utils.constants import INDICES
+from utils.constants import (
+    INDICES,
+    PREMARKET_EMOJIS,
+    PREMARKET_LABELS_BILINGUAL,
+    VIX_PANIC_THRESHOLD,
+    VIX_ELEVATED_THRESHOLD,
+    NORMAL_CLOSE_HOUR,
+    CNN_FEAR_GREED_URL,
+    CNN_FEAR_GREED_HEADERS,
+)
 
 ET = pytz.timezone("America/New_York")
-_NORMAL_CLOSE_HOUR = 16  # 4:00 PM ET
 
 
 # ------------------------------------------------------------------
@@ -48,31 +60,26 @@ def is_early_close_today() -> bool:
     if row is None:
         return False
     close_et = row["market_close"].astimezone(ET)
-    return close_et.hour < _NORMAL_CLOSE_HOUR
+    return close_et.hour < NORMAL_CLOSE_HOUR
+
 
 # ------------------------------------------------------------------
 # CNN Fear and Greed
 # ------------------------------------------------------------------
-def fetch_fear_and_greedy():
-    """Return the score and rating of CNN fear and greedy index"""
-    url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Referer': 'https://www.cnn.com/',
-        'Origin': 'https://www.cnn.com',
-    }
+
+def fetch_fear_and_greed():
+    """Return (score, rating) from the CNN Fear & Greed index, or a fallback string."""
     try:
-        response = requests.get(url, headers=headers)
+        response = requests.get(CNN_FEAR_GREED_URL, headers=CNN_FEAR_GREED_HEADERS)
         data = response.json()
     except Exception:
         data = None
     if not data:
-        return 'Information Not Available'
-    else:
-        score = data['fear_and_greed']['score']
-        rating = data['fear_and_greed']['rating']
-        return score, rating
+        return "Information Not Available"
+    score  = data["fear_and_greed"]["score"]
+    rating = data["fear_and_greed"]["rating"]
+    return score, rating
+
 
 # ------------------------------------------------------------------
 # Cog
@@ -85,10 +92,12 @@ class Scheduler(commands.Cog):
         self.bot = bot
         self.normal_close_update.start()
         self.early_close_update.start()
+        self.premarket_update.start()
 
     def cog_unload(self):
         self.normal_close_update.cancel()
         self.early_close_update.cancel()
+        self.premarket_update.cancel()
 
     # ------------------------------------------------------------------
     # Shared embed sender
@@ -115,14 +124,80 @@ class Scheduler(commands.Cog):
                 lines.append(f"**{label}**  {icon} {price:,.2f}  ({sign}{pct:.2f}%)")
             else:
                 lines.append(f"**{label}** \u2014 unavailable")
-        fear_and_greed = fetch_fear_and_greedy()
+        fear_and_greed = fetch_fear_and_greed()
         lines.append(f"**CNN Fear & Greed Index** {fear_and_greed[0]:,.2f} {fear_and_greed[1]}")
         embed.description = "\n".join(lines)
         await channel.send(embed=embed)
 
     # ------------------------------------------------------------------
-    # Dev: manual trigger for testing
+    # Pre-market brief sender
     # ------------------------------------------------------------------
+
+    async def _send_premarket_brief(self):
+        channel_id = config.MARKET_CHANNEL_ID
+        if not channel_id:
+            return
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            return
+
+        snapshot = await asyncio.to_thread(fetch_premarket_snapshot)
+
+        lines = []
+        for label, data in snapshot.items():
+            display = PREMARKET_LABELS_BILINGUAL.get(label, label)
+
+            if label == "Gold/Oil Ratio":
+                val = data.get("value")
+                ratio_str = f"{val:.2f}" if val else "N/A"
+                lines.append(f"**⚖️ {display}**  {ratio_str}")
+                continue
+
+            icon  = PREMARKET_EMOJIS.get(label, "•")
+            price = data.get("price")
+            pct   = data.get("pct_change")
+
+            if price is None:
+                lines.append(f"**{icon} {display}**  — unavailable")
+                continue
+
+            dir_icon = change_emoji(pct) if pct is not None else "➡️"
+            sign     = "+" if (pct or 0) >= 0 else ""
+            pct_str  = f"({sign}{pct:.2f}%)" if pct is not None else ""
+
+            vix_note = ""
+            if label == "VIX":
+                if price >= VIX_PANIC_THRESHOLD:
+                    vix_note = "  🔴 PANIC"
+                elif price >= VIX_ELEVATED_THRESHOLD:
+                    vix_note = "  ⚠️ Elevated"
+                else:
+                    vix_note = "  ✅ Normal"
+
+            lines.append(
+                f"**{icon} {display}**  {dir_icon} {price:,.2f}  {pct_str}{vix_note}"
+            )
+
+        data_summary = build_data_summary(snapshot)
+        analysis     = await analyze_premarket(data_summary)
+
+        lines.append(f"\n**🤖 AI分析**\n{analysis}")
+
+        embed = make_embed("📊 Pre-Market Briefing 盘前简报", color=discord.Color.orange())
+        embed.description = "\n".join(lines)
+        await channel.send(embed=embed)
+
+    # ------------------------------------------------------------------
+    # Dev: manual triggers for testing
+    # ------------------------------------------------------------------
+
+    @commands.command(name="premarket", hidden=True)
+    @commands.is_owner()
+    async def force_premarket_brief(self, ctx):
+        """Owner-only: manually fire the pre-market brief right now."""
+        await ctx.send("Fetching pre-market data…", delete_after=5)
+        await self._send_premarket_brief()
+        await ctx.send("Pre-market brief sent.", delete_after=5)
 
     @commands.command(name="marketsummary", hidden=True)
     @commands.is_owner()
@@ -130,6 +205,20 @@ class Scheduler(commands.Cog):
         """Owner-only: manually fire the market summary right now."""
         await self._send_summary()
         await ctx.send("Market summary sent.", delete_after=5)
+
+    # ------------------------------------------------------------------
+    # Pre-market: 9:00 AM ET — fires on all trading days
+    # ------------------------------------------------------------------
+
+    @tasks.loop(time=time(9, 0, tzinfo=ET))
+    async def premarket_update(self):
+        if not market_open_today():
+            return
+        await self._send_premarket_brief()
+
+    @premarket_update.before_loop
+    async def before_premarket(self):
+        await self.bot.wait_until_ready()
 
     # ------------------------------------------------------------------
     # Normal close: 4:05 PM ET
