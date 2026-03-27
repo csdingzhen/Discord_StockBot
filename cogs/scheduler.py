@@ -15,7 +15,7 @@ import requests
 from discord.ext import commands, tasks
 from datetime import time, date
 
-import pytz
+from zoneinfo import ZoneInfo
 import pandas_market_calendars as mcal
 
 import config
@@ -34,7 +34,7 @@ from utils.constants import (
     CNN_FEAR_GREED_HEADERS,
 )
 
-ET = pytz.timezone("America/New_York")
+ET = ZoneInfo("America/New_York")
 
 
 # ------------------------------------------------------------------
