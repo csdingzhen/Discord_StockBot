@@ -20,6 +20,7 @@ NEWS_API_KEY: str = os.getenv("NEWS_API_KEY", "")
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
 FRED_API_KEY: str = os.getenv("FRED_API_KEY", "")
+FMP_API_KEY:  str = os.getenv("FMP_API_KEY",  "")
 
 # ---------------------------------------------------------------------------
 # Misc

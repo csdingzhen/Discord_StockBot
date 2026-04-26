@@ -161,6 +161,32 @@ VIX_PANIC_THRESHOLD    = 30
 VIX_ELEVATED_THRESHOLD = 20
 
 # ---------------------------------------------------------------------------
+# Earnings watchlist — major Dow 30 + Nasdaq 100 + S&P 500 components
+# Used to filter FMP earnings calendar to notable names only.
+# ---------------------------------------------------------------------------
+EARNINGS_WATCHLIST = {
+    # Dow Jones 30
+    "AAPL", "AMGN", "AXP", "BA",   "CAT",  "CRM",  "CSCO", "CVX",  "DIS",
+    "GS",   "HD",   "HON", "IBM",  "JNJ",  "JPM",  "KO",   "MCD",  "MMM",
+    "MRK",  "MSFT", "NKE", "PG",   "SHW",  "TRV",  "UNH",  "V",    "VZ",  "WMT",
+    # Nasdaq 100 additions
+    "NVDA", "META", "GOOGL", "AMZN", "TSLA", "AVGO", "QCOM", "AMD",
+    "NFLX", "ADBE", "ORCL",  "INTU", "AMAT", "MU",   "PANW", "CRWD",
+    "MRVL", "ADI",  "LRCX",  "KLAC", "SNPS", "CDNS", "ISRG", "REGN",
+    "VRTX", "GILD", "MRNA",  "MELI", "PYPL",
+    # S&P 500 additions — Financials
+    "BAC", "WFC", "MS", "C", "BLK", "SPGI", "MCO",
+    # S&P 500 additions — Energy
+    "XOM", "COP", "EOG",
+    # S&P 500 additions — Healthcare
+    "LLY", "ABBV", "BMY", "PFE", "MDT", "SYK",
+    # S&P 500 additions — Industrials / Defense
+    "RTX", "GE", "UNP", "DE", "LMT", "NOC", "GD",
+    # S&P 500 additions — Consumer / Telecom
+    "SBUX", "LOW", "TGT", "COST", "PEP", "PM", "MO", "CMCSA", "T", "NEE",
+}
+
+# ---------------------------------------------------------------------------
 # Scheduler — market hours
 # ---------------------------------------------------------------------------
 NORMAL_CLOSE_HOUR = 16  # 4:00 PM ET

@@ -13,7 +13,7 @@ import asyncio
 import discord
 import requests
 from discord.ext import commands, tasks
-from datetime import time, date
+from datetime import time, date, timedelta
 
 from zoneinfo import ZoneInfo
 import pandas_market_calendars as mcal
@@ -22,8 +22,10 @@ import config
 from services.market_data import get_ticker_info
 from services.premarket_data import fetch_premarket_snapshot, build_data_summary
 from services.llm_client import analyze_premarket
-from utils.formatters import change_emoji, make_embed
+from services.earnings_data import fetch_weekly_calendar, fetch_todays_results
+from utils.formatters import beat_miss_str, change_emoji, format_large_number, make_embed
 from utils.constants import (
+    EARNINGS_WATCHLIST,
     INDICES,
     PREMARKET_EMOJIS,
     PREMARKET_LABELS_BILINGUAL,
@@ -93,11 +95,15 @@ class Scheduler(commands.Cog):
         self.normal_close_update.start()
         self.early_close_update.start()
         self.premarket_update.start()
+        self.weekly_earnings_update.start()
+        self.aftermarket_earnings_update.start()
 
     def cog_unload(self):
         self.normal_close_update.cancel()
         self.early_close_update.cancel()
         self.premarket_update.cancel()
+        self.weekly_earnings_update.cancel()
+        self.aftermarket_earnings_update.cancel()
 
     # ------------------------------------------------------------------
     # Shared embed sender
@@ -206,6 +212,22 @@ class Scheduler(commands.Cog):
         await self._send_summary()
         await ctx.send("Market summary sent.", delete_after=5)
 
+    @commands.command(name="weeklyearnings", hidden=True)
+    @commands.is_owner()
+    async def force_weekly_earnings(self, ctx):
+        """Owner-only: manually fire the weekly earnings calendar right now."""
+        await ctx.send("Fetching weekly earnings calendar…", delete_after=5)
+        await self._send_weekly_earnings()
+        await ctx.send("Weekly earnings calendar sent.", delete_after=5)
+
+    @commands.command(name="todayearnings", hidden=True)
+    @commands.is_owner()
+    async def force_todays_earnings(self, ctx):
+        """Owner-only: manually fire today's earnings results right now."""
+        await ctx.send("Fetching today's earnings results…", delete_after=5)
+        await self._send_todays_earnings()
+        await ctx.send("Today's earnings results sent.", delete_after=5)
+
     # ------------------------------------------------------------------
     # Pre-market: 9:00 AM ET — fires on all trading days
     # ------------------------------------------------------------------
@@ -248,6 +270,126 @@ class Scheduler(commands.Cog):
 
     @early_close_update.before_loop
     async def before_early_close(self):
+        await self.bot.wait_until_ready()
+
+    # ------------------------------------------------------------------
+    # Weekly earnings calendar: Monday 9:00 AM ET
+    # ------------------------------------------------------------------
+
+    async def _send_weekly_earnings(self):
+        channel_id = config.MARKET_CHANNEL_ID
+        if not channel_id:
+            return
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            return
+
+        entries = await asyncio.to_thread(fetch_weekly_calendar, EARNINGS_WATCHLIST)
+
+        today = date.today()
+        monday = today - timedelta(days=today.weekday())
+        friday = monday + timedelta(days=4)
+
+        embed = make_embed(
+            "📅 本周财报日历 This Week's Earnings Calendar",
+            description=f"{monday.strftime('%b %d')} – {friday.strftime('%b %d, %Y')}",
+            color=discord.Color.gold(),
+        )
+
+        day_names = ["Monday 周一", "Tuesday 周二", "Wednesday 周三", "Thursday 周四", "Friday 周五"]
+        has_any = False
+        for i, day_name in enumerate(day_names):
+            day_date    = monday + timedelta(days=i)
+            day_str     = day_date.isoformat()
+            day_entries = [e for e in entries if e.get("date") == day_str]
+
+            if not day_entries:
+                embed.add_field(
+                    name=f"{day_name}  {day_date.strftime('%b %d')}",
+                    value="—",
+                    inline=False,
+                )
+                continue
+
+            has_any = True
+            items = "  ".join(
+                f"`{e['symbol']}`" + (f" (${e['epsEstimated']}e)" if e.get("epsEstimated") is not None else "")
+                for e in day_entries
+            )
+            if len(items) > 1024:
+                items = items[:1021] + "..."
+            embed.add_field(
+                name=f"{day_name}  {day_date.strftime('%b %d')}",
+                value=items,
+                inline=False,
+            )
+
+        if not has_any:
+            embed.description += "\n\n*本周无主要财报 No major earnings this week.*"
+
+        await channel.send(embed=embed)
+
+    @tasks.loop(time=time(9, 0, tzinfo=ET))
+    async def weekly_earnings_update(self):
+        if not market_open_today() or date.today().weekday() != 0:
+            return
+        await self._send_weekly_earnings()
+
+    @weekly_earnings_update.before_loop
+    async def before_weekly_earnings(self):
+        await self.bot.wait_until_ready()
+
+    # ------------------------------------------------------------------
+    # Aftermarket earnings results: 5:30 PM ET (daily trading days)
+    # ------------------------------------------------------------------
+
+    async def _send_todays_earnings(self):
+        channel_id = config.MARKET_CHANNEL_ID
+        if not channel_id:
+            return
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            return
+
+        results = await asyncio.to_thread(fetch_todays_results, EARNINGS_WATCHLIST)
+        if not results:
+            return
+
+        lines = []
+        for r in results:
+            sym   = r.get("symbol", "")
+            eps_a = r.get("epsActual")
+            eps_e = r.get("epsEstimated")
+            rev_a = r.get("revenueActual")
+            rev_e = r.get("revenueEstimated")
+
+            eps_str = f"EPS ${eps_a} vs ${eps_e}e  {beat_miss_str(eps_a, eps_e)}" if eps_a is not None else "EPS N/A"
+            rev_str = f"Rev {format_large_number(rev_a)} vs {format_large_number(rev_e)}e  {beat_miss_str(rev_a, rev_e)}" if rev_a is not None else ""
+
+            line = f"**{sym}** — {eps_str}"
+            if rev_str:
+                line += f"\n    {rev_str}"
+            lines.append(line)
+
+        description = "\n".join(lines)
+        if len(description) > 4096:
+            description = description[:4093] + "..."
+
+        embed = make_embed(
+            "📊 今日财报结果 Today's Earnings Results",
+            description=description,
+            color=discord.Color.blurple(),
+        )
+        await channel.send(embed=embed)
+
+    @tasks.loop(time=time(17, 30, tzinfo=ET))
+    async def aftermarket_earnings_update(self):
+        if not market_open_today():
+            return
+        await self._send_todays_earnings()
+
+    @aftermarket_earnings_update.before_loop
+    async def before_aftermarket_earnings(self):
         await self.bot.wait_until_ready()
 
 

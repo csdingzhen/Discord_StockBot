@@ -34,6 +34,25 @@ def price_color(change_pct: float) -> discord.Color:
     return discord.Color.green() if change_pct >= 0 else discord.Color.red()
 
 
+def beat_miss_str(actual, estimated) -> str:
+    """Return a beat/miss label with percentage, or empty string if data is missing."""
+    if actual is None or estimated is None or estimated == 0:
+        return ""
+    pct = (actual - estimated) / abs(estimated) * 100
+    if pct > 0:
+        return f"✅ Beat (+{pct:.1f}%)"
+    if pct < 0:
+        return f"❌ Miss ({pct:.1f}%)"
+    return "➡️ In-line"
+
+
+def timing_label(time_code: str) -> str:
+    """Convert FMP time codes to display labels."""
+    return {"bmo": "盘前 BMO", "amc": "盘后 AMC", "dmh": "盘中 DMH"}.get(
+        (time_code or "").lower(), time_code or "—"
+    )
+
+
 def make_embed(
     title: str,
     description: str = "",
