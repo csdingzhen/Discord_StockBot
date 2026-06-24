@@ -16,8 +16,10 @@ pip install -r requirements.txt
 ```env
 DISCORD_TOKEN=你的Discord Bot Token       # 必填
 MARKET_CHANNEL_ID=频道ID                  # 定时推送用，不填则跳过
-ALERT_CHANNEL_ID=频道ID                   # 预留警报频道
-ANTHROPIC_API_KEY=你的Claude API Key      # !analyze 命令需要
+ALERT_CHANNEL_ID=频道ID                   # Jin10 重大快讯(L3)推送频道
+NEWS_CHANNEL_ID=频道ID                    # Jin10 快讯摘要(L2)推送频道
+DEEPSEEK_API_KEY=你的DeepSeek API Key     # !analyze、盘前简报、Jin10快讯分析都需要
+JIN10_API_KEY=你的Jin10 MCP Token         # Jin10快讯功能需要
 NEWS_API_KEY=你的NewsAPI Key              # 新闻功能需要（可选）
 ```
 
@@ -41,7 +43,7 @@ python bot.py
 | `!options <TICKER>` | 期权链（按未平仓量排序） | `!options SPY` |
 | `!earnings <TICKER>` | 财报日历 | `!earnings AAPL` |
 | `!macro` | 宏观指标（国债收益率、美元指数等） | `!macro` |
-| `!analyze <TICKER>` | AI 技术面分析（需要 Claude API Key） | `!analyze TSLA` |
+| `!analyze <TICKER>` | AI 技术面分析（需要 DeepSeek API Key） | `!analyze TSLA` |
 | `!stockhelp` | 显示所有命令 | `!stockhelp` |
 
 ---
@@ -89,4 +91,5 @@ trading-bot/
 
 - **股票 / 加密 / 期权**: [Yahoo Finance](https://finance.yahoo.com/) via `yfinance`
 - **新闻**: [NewsAPI](https://newsapi.org/)
-- **AI 分析**: [Anthropic Claude](https://www.anthropic.com/)
+- **AI 分析**: [DeepSeek](https://www.deepseek.com/)
+- **快讯数据**: [金十数据 MCP](https://mcp.jin10.com/)

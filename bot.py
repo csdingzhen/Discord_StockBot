@@ -12,6 +12,7 @@ COGS = [
     "cogs.macro",
     "cogs.scheduler",
     "cogs.analysis",
+    "cogs.news",
 ]
 
 intents = discord.Intents.default()

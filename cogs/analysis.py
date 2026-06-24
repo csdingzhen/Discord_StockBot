@@ -1,7 +1,7 @@
 """
 analysis.py — LLM-powered technical analysis commands.
 Commands: !analyze <TICKER>
-Requires ANTHROPIC_API_KEY in .env.
+Requires DEEPSEEK_API_KEY in .env.
 """
 from discord.ext import commands
 

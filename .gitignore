@@ -20,3 +20,10 @@ package-lock.json
 # OS junk
 .DS_Store
 Thumbs.db
+
+# context file
+jin10_demo/
+
+# local sqlite storage
+data/
+*.db
