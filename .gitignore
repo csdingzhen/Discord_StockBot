@@ -27,3 +27,6 @@ jin10_demo/
 # local sqlite storage
 data/
 *.db
+
+# deploy-machine logs
+deploy/logs/
