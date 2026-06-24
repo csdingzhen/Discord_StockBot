@@ -23,7 +23,7 @@ param(
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 
-$VenvPython = Join-Path $RepoRoot "venv\Scripts\python.exe"
+$VenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 $LogDir = Join-Path $RepoRoot "deploy\logs"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
