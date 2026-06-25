@@ -21,7 +21,7 @@ import pandas_market_calendars as mcal
 import config
 from services.market_data import get_ticker_info
 from services.premarket_data import fetch_premarket_snapshot, build_data_summary
-from services.llm_client import analyze_premarket
+from services.llm_client import analyze_premarket, analyze_earnings_reaction
 from services.earnings_data import fetch_weekly_calendar, fetch_todays_results
 from utils.formatters import beat_miss_str, change_emoji, format_large_number, make_embed
 from utils.constants import (
@@ -368,7 +368,21 @@ class Scheduler(commands.Cog):
 
             line = f"**{sym}** — {eps_str}"
             if rev_str:
-                line += f"\n    {rev_str}"
+                line += f"\n    {rev_str}"
+
+            if eps_a is not None:
+                info     = await asyncio.to_thread(get_ticker_info, sym)
+                pm_price = info.get("postMarketPrice")
+                pm_pct   = info.get("postMarketChangePercent")
+                if pm_price is not None and pm_pct is not None:
+                    sign = "+" if pm_pct >= 0 else ""
+                    line += f"\n    盘后 {change_emoji(pm_pct)} ${pm_price:,.2f}  ({sign}{pm_pct:.2f}%)"
+                    try:
+                        reaction = await analyze_earnings_reaction(sym, eps_a, eps_e, rev_a, rev_e, pm_pct)
+                        line += f"\n    🤖 {reaction}"
+                    except Exception as e:
+                        print(f"[scheduler] earnings reaction analysis failed for {sym}: {e}")
+
             lines.append(line)
 
         description = "\n".join(lines)
