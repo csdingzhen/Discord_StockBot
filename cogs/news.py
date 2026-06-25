@@ -183,6 +183,19 @@ class News(commands.Cog):
         await channel.send(embed=embed)
 
     async def _post_l3_alert(self, item: dict, category: str):
+        recent = jin10_store.get_recent_l3_items(minutes=45, limit=5)
+        if recent:
+            try:
+                is_followup = await llm_client.is_followup_story(
+                    item["content"], [r["content"] for r in recent]
+                )
+            except Exception as e:
+                print(f"[news] follow-up check failed, posting anyway: {e}")
+                is_followup = False
+            if is_followup:
+                print(f"[news] suppressing L3 post (follow-up of a recent story): {item['url']}")
+                return
+
         channel_id = config.ALERT_CHANNEL_ID
         if not channel_id:
             return

@@ -8,7 +8,7 @@ level/category plus whether an item has been posted as an L3 alert or rolled
 into an L2 digest yet, so the polling loop and the digest-flush task can both
 query this table without double-posting.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from storage.db import get_connection
 
@@ -101,6 +101,22 @@ def mark_digested(urls: list[str]):
             [(url,) for url in urls],
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def get_recent_l3_items(minutes: int = 45, limit: int = 5) -> list[dict]:
+    """Recently posted L3 alerts, for follow-up/duplicate-story detection
+    before posting another L3 alert about a still-developing event."""
+    conn = get_connection()
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+        rows = conn.execute(
+            "SELECT url, time, content FROM jin10_flash "
+            "WHERE posted_l3 = 1 AND fetched_at >= ? ORDER BY fetched_at DESC LIMIT ?",
+            (cutoff, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
     finally:
         conn.close()
 
