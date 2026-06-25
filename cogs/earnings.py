@@ -22,9 +22,9 @@ class Earnings(commands.Cog):
             return
         ticker = ticker.upper()
         async with ctx.typing():
-            upcoming, recent = fetch_ticker_earnings(ticker)
-            if upcoming is None and recent is None:
-                await ctx.send(f"No earnings data found for **{ticker}**.")
+            upcoming, recent, error = fetch_ticker_earnings(ticker)
+            if error:
+                await ctx.send(f"**{ticker}**: {error}")
                 return
 
             embed = make_embed(f"📅 Earnings: {ticker}", color=discord.Color.orange())
@@ -49,8 +49,11 @@ class Earnings(commands.Cog):
                 lines = [
                     f"📆 **{recent.get('date', 'N/A')}**",
                     f"EPS:     **${eps_a}** vs ${eps_e} est  {beat_miss_str(eps_a, eps_e)}",
-                    f"Revenue: **{format_large_number(rev_a)}** vs {format_large_number(rev_e)} est  {beat_miss_str(rev_a, rev_e)}",
                 ]
+                if rev_a is not None or rev_e is not None:
+                    lines.append(
+                        f"Revenue: **{format_large_number(rev_a)}** vs {format_large_number(rev_e)} est  {beat_miss_str(rev_a, rev_e)}"
+                    )
                 embed.add_field(name="📋 最近财报 Last Report", value="\n".join(lines), inline=False)
 
         await ctx.send(embed=embed)
