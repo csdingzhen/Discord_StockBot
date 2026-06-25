@@ -103,3 +103,25 @@ def mark_digested(urls: list[str]):
         conn.commit()
     finally:
         conn.close()
+
+
+def get_recent_items(level: int | None = None, limit: int = 10) -> list[dict]:
+    """Most recently fetched items, optionally filtered by level. For spot-checking
+    classification quality (e.g. what's getting silently filtered into L1)."""
+    conn = get_connection()
+    try:
+        if level is not None:
+            rows = conn.execute(
+                "SELECT url, time, content, level, category FROM jin10_flash "
+                "WHERE level = ? ORDER BY fetched_at DESC LIMIT ?",
+                (level, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT url, time, content, level, category FROM jin10_flash "
+                "ORDER BY fetched_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
