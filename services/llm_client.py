@@ -183,3 +183,26 @@ async def summarize_flash_digest(items: list[dict]) -> str:
         f"快讯列表:\n{listing}"
     )
     return await _call_deepseek([{"role": "user", "content": prompt}])
+
+
+async def analyze_earnings_reaction(
+    symbol: str,
+    eps_actual, eps_estimated,
+    revenue_actual, revenue_estimated,
+    postmarket_pct: float,
+) -> str:
+    """
+    One-line Chinese narrative tying EPS/revenue beat-or-miss together with
+    the after-hours price reaction — e.g. flagging a beat that still sold
+    off (often a guidance signal) rather than just restating the numbers.
+    """
+    prompt = (
+        f"以下是{symbol}的财报数据：\n"
+        f"EPS: 实际 {eps_actual}，预期 {eps_estimated}\n"
+        f"营收: 实际 {revenue_actual}，预期 {revenue_estimated}\n"
+        f"盘后股价变动: {postmarket_pct:+.2f}%\n\n"
+        "请用一句话（不超过40字）中文点评财报数字与盘后股价反应是否一致。如果不一致"
+        "（例如业绩超预期但股价下跌），简要推测可能原因（如指引不及预期、估值已price-in等）。"
+        "不要提供投资建议。"
+    )
+    return await _call_deepseek([{"role": "user", "content": prompt}])

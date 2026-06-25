@@ -2,17 +2,19 @@
 macro_data.py — Macro dashboard data fetching.
 
 Sources:
-  - yfinance:               crypto, commodities, USD index, VIX, USD/CNH, US 10Y
-  - FRED (pandas_datareader): US 2Y yield, 10Y TIPS real yield, Fed RRP, 10Y-2Y spread
-  - Stooq (pandas_datareader): Japan 10Y JGB yield
+  - yfinance:                 crypto, commodities, USD index, VIX, USD/CNH, US 10Y
+  - FRED (REST API):          US 2Y yield, 10Y TIPS real yield, Fed RRP, 10Y-2Y spread,
+                               Japan 10Y govt bond yield (OECD series, monthly not daily)
 
 All public-facing data is returned as plain dicts — no Discord/formatting logic here.
 
-FRED and Stooq are imported lazily so that a missing pandas_datareader installation
-degrades gracefully (returns None values) instead of crashing at startup.
+Japan 10Y previously came from Stooq's CSV download, but Stooq now serves a
+JavaScript anti-bot challenge instead of CSV on that endpoint (confirmed: a
+plain requests.get returns an HTML challenge page even with a browser
+User-Agent) — there's no plain-HTTP fix for that, so it's sourced from FRED
+instead. The tradeoff is granularity: FRED's Japan series is monthly
+(OECD-sourced), not daily like the rest of the bond section.
 """
-import csv
-import io
 import requests
 import yfinance as yf
 
@@ -20,7 +22,6 @@ from config import FRED_API_KEY
 from utils.constants import (
     MACRO_DASHBOARD_YFINANCE,
     MACRO_DASHBOARD_FRED,
-    MACRO_DASHBOARD_STOOQ,
 )
 
 
@@ -76,30 +77,6 @@ def _fred_latest(series_id: str) -> dict:
         return {"value": None, "change": None}
 
 
-def _stooq_latest(symbol: str) -> dict:
-    """
-    Return the latest Close and absolute 1-day change from Stooq.
-    Uses Stooq's CSV download endpoint; rows are sorted ascending by date.
-    """
-    try:
-        resp = requests.get(
-            f"https://stooq.com/q/d/l/?s={symbol.lower()}&i=d",
-            timeout=10,
-        )
-        resp.raise_for_status()
-        rows = sorted(
-            csv.DictReader(io.StringIO(resp.text)),
-            key=lambda r: r["Date"],
-        )
-        if not rows:
-            return {"value": None, "change": None}
-        value  = float(rows[-1]["Close"])
-        change = value - float(rows[-2]["Close"]) if len(rows) >= 2 else None
-        return {"value": value, "change": change}
-    except Exception:
-        return {"value": None, "change": None}
-
-
 # ------------------------------------------------------------------
 # Snapshot builder
 # ------------------------------------------------------------------
@@ -117,11 +94,8 @@ def fetch_macro_snapshot() -> dict:
     # --- yfinance (8 tickers) ---
     yf_data = {key: _yf_quote(sym) for key, sym in MACRO_DASHBOARD_YFINANCE.items()}
 
-    # --- FRED (4 series) ---
+    # --- FRED (5 series) ---
     fred_data = {key: _fred_latest(series) for key, series in MACRO_DASHBOARD_FRED.items()}
-
-    # --- Stooq (1 series) ---
-    stooq_data = {key: _stooq_latest(sym) for key, sym in MACRO_DASHBOARD_STOOQ.items()}
 
     # --- Derived: ratios ---
     gold_p   = yf_data.get("Gold",   {}).get("price")
@@ -132,7 +106,7 @@ def fetch_macro_snapshot() -> dict:
 
     # --- Derived: US-Japan yield spread ---
     us10y_val = yf_data.get("US10Y", {}).get("price")   # ^TNX: e.g. 4.35 means 4.35 %
-    jp10y_val = stooq_data.get("JP10Y", {}).get("value")
+    jp10y_val = fred_data.get("JP10Y", {}).get("value")
     us_jp     = round(us10y_val - jp10y_val, 2) if us10y_val and jp10y_val else None
 
     # --- Inversion flag for 10Y-2Y spread ---
@@ -161,7 +135,7 @@ def fetch_macro_snapshot() -> dict:
                 "change": yf_data.get("US10Y", {}).get("raw_change"),
             },
             "US2Y":        fred_data.get("US2Y", {}),
-            "JP10Y":       stooq_data.get("JP10Y", {}),
+            "JP10Y":       fred_data.get("JP10Y", {}),
             "USJPSpread":  {"value": us_jp, "change": None},
             "Spread10Y2Y": {**fred_data.get("Spread10Y2Y", {}), "inverted": inverted},
         },

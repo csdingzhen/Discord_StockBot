@@ -86,15 +86,11 @@ MACRO_DASHBOARD_YFINANCE = {
 
 # FRED series (fetched via pandas_datareader)
 MACRO_DASHBOARD_FRED = {
-    "US2Y":        "DGS2",       # 2-Year Treasury yield (daily)
-    "TIPS10Y":     "DFII10",     # 10-Year TIPS real yield (daily)
-    "RRP":         "RRPONTSYD",  # Fed overnight reverse repo outstanding ($B, daily)
-    "Spread10Y2Y": "T10Y2Y",     # 10Y minus 2Y spread, pre-computed by FRED (daily)
-}
-
-# Stooq tickers
-MACRO_DASHBOARD_STOOQ = {
-    "JP10Y": "10yjpy.b",  # Japan 10-Year Government Bond yield
+    "US2Y":        "DGS2",             # 2-Year Treasury yield (daily)
+    "TIPS10Y":     "DFII10",           # 10-Year TIPS real yield (daily)
+    "RRP":         "RRPONTSYD",        # Fed overnight reverse repo outstanding ($B, daily)
+    "Spread10Y2Y": "T10Y2Y",           # 10Y minus 2Y spread, pre-computed by FRED (daily)
+    "JP10Y":       "IRLTLT01JPM156N",  # Japan 10Y govt bond yield (OECD via FRED, MONTHLY)
 }
 
 # Bilingual display labels for each macro item key
@@ -109,8 +105,8 @@ MACRO_ITEM_LABELS = {
     "RRP":         "Fed 逆回购 RRP",
     "US10Y":       "美债 10Y",
     "US2Y":        "美债 2Y",
-    "JP10Y":       "日债 10Y JGB",
-    "USJPSpread":  "美日利差 US-JP",
+    "JP10Y":       "日债 10Y JGB (月)",  # monthly via FRED/OECD, not daily like the other bond rows
+    "USJPSpread":  "美日利差 US-JP (月)",
     "Spread10Y2Y": "10Y-2Y 利差",
     "DXY":         "美元指数 DXY",
     "VIX":         "VIX 恐慌指数",
