@@ -1,0 +1,12 @@
+.venv/
+venv/
+node_modules/
+.git/
+__pycache__/
+**/__pycache__/
+deploy/logs/
+.env
+*.env
+data/
+*.md
+.vscode/
