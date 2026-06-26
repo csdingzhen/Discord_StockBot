@@ -45,19 +45,85 @@ def _week_bounds() -> tuple[str, str]:
     return monday.isoformat(), friday.isoformat()
 
 
+def _parse_money_str(s) -> float | None:
+    if not s or not isinstance(s, str):
+        return None
+    try:
+        return float(s.replace("$", "").replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _fetch_nasdaq_calendar_day(date_str: str) -> list[dict]:
+    """One day of Nasdaq's public earnings calendar, normalized to the same
+    shape as FMP's calendar entries (symbol/date/epsActual/epsEstimated;
+    Nasdaq doesn't carry revenue figures). Used to fill gaps in FMP's free-
+    tier calendar dataset, which has been observed missing real entries
+    entirely for certain tickers (e.g. MU) even within its ungated window."""
+    try:
+        r = requests.get(
+            "https://api.nasdaq.com/api/calendar/earnings",
+            headers=_NASDAQ_HEADERS,
+            params={"date": date_str},
+            timeout=15,
+        )
+        r.raise_for_status()
+        rows = (r.json().get("data") or {}).get("rows") or []
+    except Exception:
+        return []
+
+    return [
+        {
+            "symbol": row.get("symbol"),
+            "date": date_str,
+            "epsActual": _parse_money_str(row.get("eps")),
+            "epsEstimated": _parse_money_str(row.get("epsForecast")),
+            "revenueActual": None,
+            "revenueEstimated": None,
+        }
+        for row in rows
+        if row.get("symbol")
+    ]
+
+
+def _merge_calendar_sources(fmp_entries: list[dict], nasdaq_entries: list[dict]) -> list[dict]:
+    """Union of both sources keyed by (symbol, date), preferring FMP's entry
+    when both have one (it carries revenue figures Nasdaq's doesn't)."""
+    seen = {(e.get("symbol"), e.get("date")) for e in fmp_entries}
+    merged = list(fmp_entries)
+    for e in nasdaq_entries:
+        key = (e.get("symbol"), e.get("date"))
+        if key not in seen:
+            merged.append(e)
+            seen.add(key)
+    return merged
+
+
 def fetch_weekly_calendar(watchlist: set = None) -> list[dict]:
     """
-    Fetch earnings calendar for the current Mon–Fri.
+    Fetch earnings calendar for the current Mon-Fri, merging FMP's bulk range
+    endpoint with Nasdaq's per-day calendar to cover entries FMP's free tier
+    is missing outright (confirmed gap, not just a 402 gate -- e.g. MU's
+    6/24 report never appeared in FMP's range response at all).
     Filters to watchlist symbols when provided.
     Returns entries sorted by date ascending.
     """
     start, end = _week_bounds()
     try:
-        data = _fmp_get("/earnings-calendar", {"from": start, "to": end})
+        fmp_data = _fmp_get("/earnings-calendar", {"from": start, "to": end})
+        if not isinstance(fmp_data, list):
+            fmp_data = []
     except Exception:
-        return []
-    if not isinstance(data, list):
-        return []
+        fmp_data = []
+
+    nasdaq_data = []
+    d = date.fromisoformat(start)
+    end_d = date.fromisoformat(end)
+    while d <= end_d:
+        nasdaq_data.extend(_fetch_nasdaq_calendar_day(d.isoformat()))
+        d += timedelta(days=1)
+
+    data = _merge_calendar_sources(fmp_data, nasdaq_data)
     if watchlist:
         data = [d for d in data if d.get("symbol") in watchlist]
     data.sort(key=lambda x: x.get("date", ""))
@@ -66,16 +132,20 @@ def fetch_weekly_calendar(watchlist: set = None) -> list[dict]:
 
 def fetch_todays_results(watchlist: set = None) -> list[dict]:
     """
-    Fetch earnings entries for today that already have actual EPS reported.
-    Filters to watchlist symbols when provided.
+    Fetch earnings entries for today that already have actual EPS reported,
+    merging FMP and Nasdaq's calendars for the same gap-filling reason as
+    fetch_weekly_calendar(). Filters to watchlist symbols when provided.
     """
     today = date.today().isoformat()
     try:
-        data = _fmp_get("/earnings-calendar", {"from": today, "to": today})
+        fmp_data = _fmp_get("/earnings-calendar", {"from": today, "to": today})
+        if not isinstance(fmp_data, list):
+            fmp_data = []
     except Exception:
-        return []
-    if not isinstance(data, list):
-        return []
+        fmp_data = []
+
+    nasdaq_data = _fetch_nasdaq_calendar_day(today)
+    data = _merge_calendar_sources(fmp_data, nasdaq_data)
     if watchlist:
         data = [d for d in data if d.get("symbol") in watchlist]
     return [d for d in data if d.get("epsActual") is not None]

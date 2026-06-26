@@ -169,7 +169,7 @@ EARNINGS_WATCHLIST = {
     "NVDA", "META", "GOOGL", "AMZN", "TSLA", "AVGO", "QCOM", "AMD",
     "NFLX", "ADBE", "ORCL",  "INTU", "AMAT", "MU",   "PANW", "CRWD",
     "MRVL", "ADI",  "LRCX",  "KLAC", "SNPS", "CDNS", "ISRG", "REGN",
-    "VRTX", "GILD", "MRNA",  "MELI", "PYPL",
+    "VRTX", "GILD", "MRNA",  "MELI", "PYPL", "INTC",
     # S&P 500 additions — Financials
     "BAC", "WFC", "MS", "C", "BLK", "SPGI", "MCO",
     # S&P 500 additions — Energy
