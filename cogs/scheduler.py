@@ -9,6 +9,7 @@ Fires after NYSE close:
 Set MARKET_CHANNEL_ID in .env to enable.
 """
 import asyncio
+import json
 
 import discord
 import requests
@@ -21,8 +22,10 @@ import pandas_market_calendars as mcal
 import config
 from services.market_data import get_ticker_info
 from services.premarket_data import fetch_premarket_snapshot, build_data_summary
-from services.llm_client import analyze_premarket, analyze_earnings_reaction
+from services.llm_client import analyze_premarket, analyze_earnings_reaction, analyze_sec_filing
 from services.earnings_data import fetch_weekly_calendar, fetch_todays_results
+from services.sec_filings import fetch_new_earnings_filings, fetch_ex99_text
+from storage import sec_store
 from utils.formatters import beat_miss_str, change_emoji, format_large_number, make_embed
 from utils.constants import (
     EARNINGS_WATCHLIST,
@@ -84,6 +87,31 @@ def fetch_fear_and_greed():
 
 
 # ------------------------------------------------------------------
+# SEC filing analysis formatting
+# ------------------------------------------------------------------
+
+def _format_filing_excerpt(filing_row: dict) -> str:
+    """Compact Discord-ready excerpt of a stored SEC filing analysis. The
+    full structured analysis (all bullets, full commentary/risks lists)
+    stays in sec_filings.analysis_json for future retrieval — this is just
+    the headline slice that fits a 1024-char embed field."""
+    try:
+        a = json.loads(filing_row["analysis_json"])
+    except Exception:
+        return ""
+    lines = ["📄 SEC 财报解读 (来自EX-99.1):"]
+    if a.get("executive_summary"):
+        lines.append(a["executive_summary"])
+    if a.get("bullish_highlights"):
+        lines.append(f"✅ {a['bullish_highlights'][0]}")
+    if a.get("bearish_highlights"):
+        lines.append(f"❌ {a['bearish_highlights'][0]}")
+    if a.get("market_implications"):
+        lines.append(f"📌 {a['market_implications']}")
+    return "\n".join(lines)
+
+
+# ------------------------------------------------------------------
 # Cog
 # ------------------------------------------------------------------
 
@@ -92,11 +120,13 @@ class Scheduler(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        sec_store.init_db()
         self.normal_close_update.start()
         self.early_close_update.start()
         self.premarket_update.start()
         self.weekly_earnings_update.start()
         self.aftermarket_earnings_update.start()
+        self.sec_filing_poll.start()
 
     def cog_unload(self):
         self.normal_close_update.cancel()
@@ -104,6 +134,7 @@ class Scheduler(commands.Cog):
         self.premarket_update.cancel()
         self.weekly_earnings_update.cancel()
         self.aftermarket_earnings_update.cancel()
+        self.sec_filing_poll.cancel()
 
     # ------------------------------------------------------------------
     # Shared embed sender
@@ -352,23 +383,44 @@ class Scheduler(commands.Cog):
             return
 
         results = await asyncio.to_thread(fetch_todays_results, EARNINGS_WATCHLIST)
-        if not results:
+        today_str = date.today().isoformat()
+        covered_syms = {r.get("symbol") for r in results}
+
+        # Tickers with an analyzed SEC filing today that FMP hasn't caught up
+        # to yet — surfaced separately so a same-day 8-K never goes unposted
+        # just because the numeric calendar source is lagging.
+        filing_only = []
+        for sym in EARNINGS_WATCHLIST:
+            if sym in covered_syms:
+                continue
+            filing = await asyncio.to_thread(
+                sec_store.get_analyzed_filing_for_ticker_date, sym, today_str
+            )
+            if filing:
+                filing_only.append((sym, filing))
+
+        if not results and not filing_only:
             return
 
-        lines = []
+        embed = make_embed("📊 今日财报结果 Today's Earnings Results", color=discord.Color.blurple())
+
+        field_count = 0
         for r in results:
+            if field_count >= 24:
+                break
             sym   = r.get("symbol", "")
             eps_a = r.get("epsActual")
             eps_e = r.get("epsEstimated")
             rev_a = r.get("revenueActual")
             rev_e = r.get("revenueEstimated")
 
-            eps_str = f"EPS ${eps_a} vs ${eps_e}e  {beat_miss_str(eps_a, eps_e)}" if eps_a is not None else "EPS N/A"
-            rev_str = f"Rev {format_large_number(rev_a)} vs {format_large_number(rev_e)}e  {beat_miss_str(rev_a, rev_e)}" if rev_a is not None else ""
-
-            line = f"**{sym}** — {eps_str}"
-            if rev_str:
-                line += f"\n    {rev_str}"
+            value_lines = [
+                f"EPS ${eps_a} vs ${eps_e}e  {beat_miss_str(eps_a, eps_e)}" if eps_a is not None else "EPS N/A"
+            ]
+            if rev_a is not None:
+                value_lines.append(
+                    f"Rev {format_large_number(rev_a)} vs {format_large_number(rev_e)}e  {beat_miss_str(rev_a, rev_e)}"
+                )
 
             if eps_a is not None:
                 info     = await asyncio.to_thread(get_ticker_info, sym)
@@ -376,24 +428,37 @@ class Scheduler(commands.Cog):
                 pm_pct   = info.get("postMarketChangePercent")
                 if pm_price is not None and pm_pct is not None:
                     sign = "+" if pm_pct >= 0 else ""
-                    line += f"\n    盘后 {change_emoji(pm_pct)} ${pm_price:,.2f}  ({sign}{pm_pct:.2f}%)"
+                    value_lines.append(f"盘后 {change_emoji(pm_pct)} ${pm_price:,.2f}  ({sign}{pm_pct:.2f}%)")
                     try:
                         reaction = await analyze_earnings_reaction(sym, eps_a, eps_e, rev_a, rev_e, pm_pct)
-                        line += f"\n    🤖 {reaction}"
+                        value_lines.append(f"🤖 {reaction}")
                     except Exception as e:
                         print(f"[scheduler] earnings reaction analysis failed for {sym}: {e}")
 
-            lines.append(line)
+            filing = await asyncio.to_thread(
+                sec_store.get_analyzed_filing_for_ticker_date, sym, today_str
+            )
+            if filing:
+                excerpt = _format_filing_excerpt(filing)
+                if excerpt:
+                    value_lines.append(excerpt)
 
-        description = "\n".join(lines)
-        if len(description) > 4096:
-            description = description[:4093] + "..."
+            value = "\n".join(value_lines)
+            if len(value) > 1024:
+                value = value[:1021] + "..."
+            embed.add_field(name=sym, value=value, inline=False)
+            field_count += 1
 
-        embed = make_embed(
-            "📊 今日财报结果 Today's Earnings Results",
-            description=description,
-            color=discord.Color.blurple(),
-        )
+        for sym, filing in filing_only:
+            if field_count >= 24:
+                break
+            excerpt = _format_filing_excerpt(filing)
+            value = f"⚠️ FMP数据暂未更新\n{excerpt}" if excerpt else "⚠️ 检测到新文件，分析处理中"
+            if len(value) > 1024:
+                value = value[:1021] + "..."
+            embed.add_field(name=sym, value=value, inline=False)
+            field_count += 1
+
         await channel.send(embed=embed)
 
     @tasks.loop(time=time(17, 30, tzinfo=ET))
@@ -405,6 +470,44 @@ class Scheduler(commands.Cog):
     @aftermarket_earnings_update.before_loop
     async def before_aftermarket_earnings(self):
         await self.bot.wait_until_ready()
+
+    # ------------------------------------------------------------------
+    # SEC EDGAR filing monitor: poll every 20 min on trading days
+    # ------------------------------------------------------------------
+
+    async def _run_sec_filing_poll(self):
+        new_filings = await asyncio.to_thread(fetch_new_earnings_filings, EARNINGS_WATCHLIST)
+        for filing in new_filings:
+            if filing["form_type"] != "8-K":
+                continue  # 10-Q/10-K/6-K: tracked in storage, not text-analyzed in v1
+            text = await asyncio.to_thread(
+                fetch_ex99_text, filing["cik"], filing["accession_number"], filing["primary_document"]
+            )
+            if not text:
+                continue
+            try:
+                analysis = await analyze_sec_filing(filing["ticker"], filing["form_type"], text)
+                sec_store.save_analysis(filing["accession_number"], json.dumps(analysis, ensure_ascii=False))
+            except Exception as e:
+                print(f"[scheduler] SEC filing analysis failed for {filing['ticker']}: {e}")
+
+    @tasks.loop(minutes=20)
+    async def sec_filing_poll(self):
+        if not market_open_today():
+            return
+        await self._run_sec_filing_poll()
+
+    @sec_filing_poll.before_loop
+    async def before_sec_filing_poll(self):
+        await self.bot.wait_until_ready()
+
+    @commands.command(name="secpoll", hidden=True)
+    @commands.is_owner()
+    async def force_sec_poll(self, ctx):
+        """Owner-only: manually fire the SEC filing poll right now."""
+        await ctx.send("Polling SEC EDGAR for new earnings filings…", delete_after=5)
+        await self._run_sec_filing_poll()
+        await ctx.send("SEC filing poll complete.", delete_after=5)
 
 
 async def setup(bot: commands.Bot):

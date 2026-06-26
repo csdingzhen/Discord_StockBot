@@ -206,3 +206,62 @@ async def analyze_earnings_reaction(
         "不要提供投资建议。"
     )
     return await _call_deepseek([{"role": "user", "content": prompt}])
+
+
+# ---------------------------------------------------------------------------
+# SEC EDGAR filing analysis (8-K / EX-99.1 earnings press release)
+# ---------------------------------------------------------------------------
+
+_MAX_FILING_TEXT_CHARS = 40_000
+
+
+async def analyze_sec_filing(ticker: str, form_type: str, text: str) -> dict:
+    """
+    Structured Chinese analysis of an SEC earnings filing (typically an
+    EX-99.1 press release attached to an 8-K). Returns a dict with:
+    executive_summary, key_financials (list), bullish_highlights (list),
+    bearish_highlights (list), management_commentary (list), risks (list),
+    market_implications (str).
+
+    key_financials/management_commentary are meant to be facts extracted
+    directly from the filing text; bullish/bearish/risks/market_implications
+    are explicitly AI interpretation built on top of those facts — the
+    prompt keeps that distinction so the Discord output doesn't blur
+    "what the filing says" with "what the model thinks it means." Any
+    metric not present in the text must be omitted, never invented.
+    """
+    truncated = text[:_MAX_FILING_TEXT_CHARS]
+    prompt = (
+        f"以下是{ticker}的SEC文件（{form_type}）内容，通常是财报新闻稿。"
+        "请仔细阅读并提取对交易者有用的信息，只返回JSON，不要任何额外文字。\n\n"
+        "重要原则：\n"
+        "- key_financials 和 management_commentary 必须是从原文直接提取的事实"
+        "（数字、原话），不要加入解读。\n"
+        "- bullish_highlights、bearish_highlights、risks、market_implications 是你"
+        "基于上述事实做出的解读和推断，不是原文直接陈述。\n"
+        "- 绝对不要编造原文中没有的数据。如果某项指标原文未提及，直接省略，不要猜测或标注N/A填充。\n"
+        "- 不要提供投资建议。\n\n"
+        f"文件内容：\n{truncated}\n\n"
+        "请返回JSON，格式如下：\n"
+        '{"executive_summary": "一段话概述（中文，不超过100字）", '
+        '"key_financials": ["从原文提取的关键财务数据，每条一个指标"], '
+        '"bullish_highlights": ["看涨要点"], '
+        '"bearish_highlights": ["看跌要点"], '
+        '"management_commentary": ["管理层重要表态，原文引用或紧贴原意"], '
+        '"risks": ["潜在风险"], '
+        '"market_implications": "对市场/股价的可能影响（一句话，不超过60字）"}'
+    )
+    raw = await _call_deepseek(
+        [{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+    )
+    data = json.loads(raw)
+    return {
+        "executive_summary": data.get("executive_summary") or "",
+        "key_financials": data.get("key_financials") or [],
+        "bullish_highlights": data.get("bullish_highlights") or [],
+        "bearish_highlights": data.get("bearish_highlights") or [],
+        "management_commentary": data.get("management_commentary") or [],
+        "risks": data.get("risks") or [],
+        "market_implications": data.get("market_implications") or "",
+    }
