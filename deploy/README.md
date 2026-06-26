@@ -4,11 +4,14 @@ This bot should run continuously on exactly **one** machine. Running it on
 two machines at once means both connect to Discord with the same bot
 token and both answer every command — confusing duplicate responses.
 
-The bot runs in Docker on the deploy machine. A small PowerShell
-supervisor (`deploy/run_supervised.ps1`) polls `origin/main` and rebuilds
-the container on new commits. Docker itself (`restart: unless-stopped`)
-handles crash recovery, and the deploy machine reboots nightly at 00:00 —
-the setup below makes sure it comes back unattended.
+The bot runs in Docker on the deploy machine. The repo is bind-mounted
+into the container, so a small PowerShell supervisor
+(`deploy/run_supervised.ps1`) only has to pull + restart on new commits —
+no rebuild, except when `requirements.txt` itself changes (dependencies
+are baked into the image, not bind-mounted). Docker itself
+(`restart: unless-stopped`) handles crash recovery, and the deploy machine
+reboots nightly at 00:00 — the setup below makes sure it comes back
+unattended.
 
 ## One-time setup on the deploy machine
 
@@ -59,11 +62,19 @@ the setup below makes sure it comes back unattended.
 ## Day-to-day workflow
 
 - Edit code anywhere, commit, `git push` to `origin/main`.
-- The deploy machine checks for new commits every 5 minutes by default
+- The deploy machine checks for new commits every 60 seconds by default
   (`-PollIntervalSeconds` param in `run_supervised.ps1`, edit and
-  re-register if you want a different interval), pulls, and runs
-  `docker compose up -d --build` — the pip layer only reinstalls when
-  `requirements.txt` changed.
+  re-register if you want a different interval), pulls, and:
+  - **Restarts** the container (`docker compose restart bot`) for an
+    ordinary code change — the new files are already visible inside the
+    container the moment `git pull` finishes, since the repo is
+    bind-mounted; Python just needs a fresh process to import them.
+  - **Rebuilds** (`docker compose up -d --build`) only when
+    `requirements.txt` changed, since dependencies are baked into the
+    image at build time.
+- Want it applied immediately instead of waiting for the next poll?
+  Run `.\deploy\deploy_now.ps1` — same pull + restart-or-rebuild logic,
+  plus it tails the logs afterward.
 - If the bot container crashes between poll cycles, Docker restarts it
   immediately on its own (`restart: unless-stopped`) — no need to wait
   for the next poll.
