@@ -24,6 +24,12 @@ FMP_API_KEY:  str = os.getenv("FMP_API_KEY",  "")
 JIN10_API_KEY: str = os.getenv("JIN10_API_KEY", "")
 DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
 
+# SEC EDGAR requires a descriptive User-Agent (name + contact email) on every
+# request, or it rejects the call outright. No API key needed.
+SEC_EDGAR_USER_AGENT: str = os.getenv(
+    "SEC_EDGAR_USER_AGENT", "DiscordStockBot/1.0 (yhhua@berkeley.edu)"
+)
+
 # ---------------------------------------------------------------------------
 # Misc
 # ---------------------------------------------------------------------------

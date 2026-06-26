@@ -15,6 +15,7 @@ report is sourced from Nasdaq's earnings-surprise endpoint instead, which is
 free/ungated for any ticker (Nasdaq- or NYSE-listed) but does not carry
 revenue figures, only EPS actual/estimate/surprise.
 """
+import re
 import requests
 from datetime import date, datetime, timedelta
 
@@ -99,6 +100,48 @@ def _fetch_upcoming_from_fmp(ticker: str) -> dict | None:
     return entries[0]
 
 
+def _fetch_upcoming_from_nasdaq(ticker: str) -> dict | None:
+    """Next upcoming earnings date for a ticker, via Nasdaq's analyst
+    earnings-date endpoint (Zacks-sourced natural-language report, parsed
+    with regex). Returns None if Zacks hasn't published a date yet (common
+    right after a company just reported — the next quarter's date often
+    isn't estimated until 4-6 weeks beforehand)."""
+    try:
+        r = requests.get(
+            f"https://api.nasdaq.com/api/analyst/{ticker}/earnings-date",
+            headers=_NASDAQ_HEADERS,
+            timeout=10,
+        )
+        r.raise_for_status()
+        text = (r.json().get("data") or {}).get("reportText") or ""
+    except Exception:
+        return None
+
+    if not text or "hasn't provided" in text:
+        return None
+
+    date_match = re.search(r"(\d{2}/\d{2}/\d{4})", text)
+    if not date_match:
+        return None
+    d = datetime.strptime(date_match.group(1), "%m/%d/%Y").date().isoformat()
+
+    eps_match = re.search(r"consensus EPS forecast for the quarter is \$(-?[\d.]+)", text)
+    eps_e = float(eps_match.group(1)) if eps_match else None
+
+    timing = None
+    if "after market close" in text.lower():
+        timing = "amc"
+    elif "before market open" in text.lower():
+        timing = "bmo"
+
+    return {
+        "date": d,
+        "epsEstimated": eps_e,
+        "revenueEstimated": None,
+        "timing": timing,
+    }
+
+
 def _fetch_recent_from_nasdaq(ticker: str) -> dict | None:
     """Most recent actual-vs-estimate report for a ticker, via Nasdaq's public
     earnings-surprise endpoint (no revenue figures, EPS only)."""
@@ -146,7 +189,7 @@ def fetch_ticker_earnings(ticker: str) -> tuple[dict | None, dict | None, str | 
     most-recent-actual comes from Nasdaq's public earnings-surprise endpoint.
     """
     ticker = ticker.upper()
-    upcoming = _fetch_upcoming_from_fmp(ticker)
+    upcoming = _fetch_upcoming_from_fmp(ticker) or _fetch_upcoming_from_nasdaq(ticker)
     most_recent = _fetch_recent_from_nasdaq(ticker)
 
     if upcoming is None and most_recent is None:
