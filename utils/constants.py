@@ -206,17 +206,32 @@ OPTIONS_CHAIN_DELTA_MAX   = 0.90   # skip deep-ITM (behaves like the stock)
 OPTIONS_MIN_VOLUME        = 500
 OPTIONS_MIN_NOTIONAL      = 250_000     # volume * price * 100, USD
 
-# "Strong signal" thresholds. Tier = how many of these a contract trips.
-OPTIONS_VOL_OI_RATIO      = 2.0         # today's volume >= 2x prior open interest
-OPTIONS_NOTIONAL_STRONG   = 1_000_000   # >= $1M premium traded (proxy)
-OPTIONS_NOTIONAL_EXTREME  = 5_000_000   # >= $5M alone escalates to L3
-OPTIONS_IV_JUMP           = 5.0         # IV up >= 5 vol-points vs prior day (moomoo IV is in percent)
-OPTIONS_NEAR_DTE          = 14          # <= 14 DTE counts as near-dated
-OPTIONS_NEAR_MONEY_DELTA  = (0.35, 0.65)  # |delta| in this band = near-the-money directional bet
+# Necessary gate for "unusual": today's volume EXCEEDS existing open interest
+# (more contracts changed hands today than were open) -- the textbook
+# unusual-activity signal, and what keeps liquid mega-caps from saturating on
+# raw notional alone. An alert needs this gate AND a corroborating signal.
+OPTIONS_VOL_OI_GATE       = 1.0
 
-# Tier cutoffs (number of strong conditions met).
-OPTIONS_TIER3_MIN_SIGNALS = 2          # >= 2 strong signals -> immediate alert
-OPTIONS_TIER2_MIN_SIGNALS = 1          # exactly 1 -> rolled into digest
+# Corroborating signals (any one, on top of the gate, escalates to L3).
+OPTIONS_VOL_OI_STRONG     = 3.0         # volume >= 3x open interest (not just >1x)
+OPTIONS_NOTIONAL_STRONG   = 2_000_000   # >= $2M premium traded (proxy)
+OPTIONS_NOTIONAL_EXTREME  = 10_000_000  # >= $10M alone escalates, gate or not
+OPTIONS_IV_JUMP           = 5.0         # IV up >= 5 vol-points vs prior day (moomoo IV in percent)
+OPTIONS_NEAR_DTE          = 14          # <= 14 DTE counts as near-dated
+OPTIONS_NEAR_MONEY_DELTA  = (0.35, 0.65)  # |delta| band = near-the-money directional bet
+
+# Volume z-score vs the contract's own trailing daily volume (kicks in only
+# after enough history accumulates -- see baseline settings below).
+OPTIONS_VOL_Z             = 2.0         # >= 2 sigma above its own average
+OPTIONS_VOL_Z_EXTREME     = 3.0         # >= 3 sigma alone escalates to L3
+
+# Trailing-volume baseline for the z-score.
+OPTIONS_BASELINE_LOOKBACK_DAYS = 20     # window of prior trading days to average over
+OPTIONS_BASELINE_MIN_DAYS      = 5      # need at least this many days before z-score is trusted
+
+# Per-ticker cap on immediate (L3) alerts per scan; extras demote to the
+# digest so one liquid name can't dominate the alert channel.
+OPTIONS_MAX_L3_PER_TICKER = 3
 
 # ---------------------------------------------------------------------------
 # Scheduler — market hours

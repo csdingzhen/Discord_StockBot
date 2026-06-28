@@ -12,7 +12,7 @@ moomoo SDK calls run via asyncio.to_thread; scoring is pure (services.options_sc
 """
 import asyncio
 import json
-from datetime import date, time
+from datetime import date, datetime, time
 
 import discord
 from discord.ext import commands, tasks
@@ -25,6 +25,16 @@ from storage import options_store
 from utils.constants import OPTIONS_WATCHLIST
 
 ET = ZoneInfo("America/New_York")
+
+# Regular US options session (plus a few minutes past the close for late
+# prints). Scanning outside this window just re-reads stale cumulative volume.
+_MARKET_OPEN  = time(9, 30)
+_MARKET_CLOSE = time(16, 15)
+
+
+def _within_market_hours() -> bool:
+    now = datetime.now(ET).time()
+    return _MARKET_OPEN <= now <= _MARKET_CLOSE
 
 # Intraday roll-ups of L2 flow, plus an end-of-session wrap.
 _DIGEST_TIMES = [
@@ -90,7 +100,7 @@ class OptionsFlow(commands.Cog):
 
     @tasks.loop(minutes=20)
     async def scan_loop(self):
-        if not config.MOOMOO_ENABLED or not market_open_today():
+        if not config.MOOMOO_ENABLED or not market_open_today() or not _within_market_hours():
             return
         await self._run_scan()
 
@@ -116,13 +126,16 @@ class OptionsFlow(commands.Cog):
                 prior_iv = await asyncio.to_thread(
                     options_store.get_prior_iv_map, ticker, today
                 )
-                anomalies = options_scan.detect_anomalies(snaps, prior_iv)
+                vol_baseline = await asyncio.to_thread(
+                    options_store.get_volume_baseline, ticker, today
+                )
+                anomalies = options_scan.detect_anomalies(snaps, prior_iv, vol_baseline)
 
                 for a in anomalies:
                     signals_json = json.dumps(
                         {"reasons": a["reasons"], "notional": a["notional"],
-                         "vol_oi_ratio": a["vol_oi_ratio"], "iv": a["iv"],
-                         "strike": a["strike"], "expiry": a["expiry"],
+                         "vol_oi_ratio": a["vol_oi_ratio"], "vol_zscore": a["vol_zscore"],
+                         "iv": a["iv"], "strike": a["strike"], "expiry": a["expiry"],
                          "option_type": a["option_type"]},
                         ensure_ascii=False,
                     )
@@ -202,6 +215,8 @@ class OptionsFlow(commands.Cog):
         ]
         if anomaly.get("vol_oi_ratio") is not None:
             stats.append(f"量/仓比 {anomaly['vol_oi_ratio']:.1f}")
+        if anomaly.get("vol_zscore") is not None:
+            stats.append(f"成交量 z {anomaly['vol_zscore']:.1f}")
         if anomaly.get("notional") is not None:
             stats.append(f"名义成交额(估) ${anomaly['notional']:,.0f}")
         if anomaly.get("iv") is not None:
@@ -310,7 +325,8 @@ class OptionsFlow(commands.Cog):
             )
             today = date.today().isoformat()
             prior_iv = await asyncio.to_thread(options_store.get_prior_iv_map, ticker, today)
-            anomalies = options_scan.detect_anomalies(snaps, prior_iv)
+            vol_baseline = await asyncio.to_thread(options_store.get_volume_baseline, ticker, today)
+            anomalies = options_scan.detect_anomalies(snaps, prior_iv, vol_baseline)
 
         if not anomalies:
             await ctx.send(f"**{ticker}**: {len(snaps)} contracts scanned, no anomalies above L2.")

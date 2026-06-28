@@ -9,9 +9,10 @@ Two tables:
                      Dedups same-contract re-alerts within a day and tracks
                      which tier-2 items still need rolling into a digest.
 """
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from storage.db import get_connection
+from utils.constants import OPTIONS_BASELINE_LOOKBACK_DAYS
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS option_snapshots (
@@ -103,6 +104,48 @@ def get_prior_iv_map(ticker: str, before_date: str) -> dict[str, float]:
         return {r["contract_code"]: r["iv"] for r in rows}
     finally:
         conn.close()
+
+
+def get_volume_baseline(
+    ticker: str, before_date: str, lookback_days: int = OPTIONS_BASELINE_LOOKBACK_DAYS
+) -> dict[str, tuple]:
+    """
+    Per-contract trailing daily-volume stats for the z-score, over the
+    lookback window of prior days (strictly before before_date). Each day's
+    volume is that day's peak snapshot (cumulative daily volume). Returns
+    {contract_code: (mean, std, n_days)}; empty during cold start.
+    """
+    start = (date.fromisoformat(before_date) - timedelta(days=lookback_days)).isoformat()
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT contract_code, snapshot_date, MAX(volume) AS day_vol
+            FROM option_snapshots
+            WHERE ticker = ? AND snapshot_date < ? AND snapshot_date >= ?
+            GROUP BY contract_code, snapshot_date
+            """,
+            (ticker, before_date, start),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    series: dict[str, list[float]] = {}
+    for r in rows:
+        if r["day_vol"] is not None:
+            series.setdefault(r["contract_code"], []).append(float(r["day_vol"]))
+
+    out: dict[str, tuple] = {}
+    for code, vols in series.items():
+        n = len(vols)
+        mean = sum(vols) / n
+        if n >= 2:
+            var = sum((v - mean) ** 2 for v in vols) / (n - 1)
+            std = var ** 0.5
+        else:
+            std = 0.0
+        out[code] = (mean, std, n)
+    return out
 
 
 def record_alert(anomaly: dict, alert_date: str, signals_json: str) -> bool:
