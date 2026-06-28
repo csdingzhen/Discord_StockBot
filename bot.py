@@ -8,6 +8,7 @@ COGS = [
     "cogs.crypto",
     "cogs.commodities",
     "cogs.options",
+    "cogs.options_flow",
     "cogs.earnings",
     "cogs.macro",
     "cogs.scheduler",

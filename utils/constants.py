@@ -183,6 +183,42 @@ EARNINGS_WATCHLIST = {
 }
 
 # ---------------------------------------------------------------------------
+# Options-flow anomaly detection (moomoo)
+# ---------------------------------------------------------------------------
+# Curated subset of the most liquid US single-name options. Deliberately
+# smaller than EARNINGS_WATCHLIST: each name's full near-dated chain is
+# scanned, so this is kept to names where unusual-activity signal is
+# meaningful and the contract universe stays manageable.
+OPTIONS_WATCHLIST = {
+    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD",
+    "AVGO", "NFLX", "MU", "INTC", "QCOM", "CRM", "ORCL", "PLTR",
+    "JPM", "BAC", "XOM", "COIN", "SPY", "QQQ", "IWM", "SMH",
+}
+
+# Chain-universe filter (applied once/day when building the contract set per
+# ticker via get_option_chain). Only near-dated, non-deep contracts are
+# scanned -- that's where directional/speculative flow concentrates.
+OPTIONS_CHAIN_DTE_MAX     = 45     # only expiries within 45 calendar days
+OPTIONS_CHAIN_DELTA_MIN   = 0.10   # skip far-OTM lottery tickets
+OPTIONS_CHAIN_DELTA_MAX   = 0.90   # skip deep-ITM (behaves like the stock)
+
+# Per-contract noise floor -- below these, activity isn't worth scoring.
+OPTIONS_MIN_VOLUME        = 500
+OPTIONS_MIN_NOTIONAL      = 250_000     # volume * price * 100, USD
+
+# "Strong signal" thresholds. Tier = how many of these a contract trips.
+OPTIONS_VOL_OI_RATIO      = 2.0         # today's volume >= 2x prior open interest
+OPTIONS_NOTIONAL_STRONG   = 1_000_000   # >= $1M premium traded (proxy)
+OPTIONS_NOTIONAL_EXTREME  = 5_000_000   # >= $5M alone escalates to L3
+OPTIONS_IV_JUMP           = 5.0         # IV up >= 5 vol-points vs prior day (moomoo IV is in percent)
+OPTIONS_NEAR_DTE          = 14          # <= 14 DTE counts as near-dated
+OPTIONS_NEAR_MONEY_DELTA  = (0.35, 0.65)  # |delta| in this band = near-the-money directional bet
+
+# Tier cutoffs (number of strong conditions met).
+OPTIONS_TIER3_MIN_SIGNALS = 2          # >= 2 strong signals -> immediate alert
+OPTIONS_TIER2_MIN_SIGNALS = 1          # exactly 1 -> rolled into digest
+
+# ---------------------------------------------------------------------------
 # Scheduler — market hours
 # ---------------------------------------------------------------------------
 NORMAL_CLOSE_HOUR = 16  # 4:00 PM ET

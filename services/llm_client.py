@@ -265,3 +265,58 @@ async def analyze_sec_filing(ticker: str, form_type: str, text: str) -> dict:
         "risks": data.get("risks") or [],
         "market_implications": data.get("market_implications") or "",
     }
+
+
+# ---------------------------------------------------------------------------
+# Options-flow anomaly interpretation
+# ---------------------------------------------------------------------------
+
+async def analyze_options_anomaly(
+    contract_label: str,
+    option_type: str,
+    signals: list[str],
+    metrics: dict,
+    underlying_price: float | None,
+    earnings_date: str | None = None,
+) -> str:
+    """
+    Short Chinese interpretation of an unusual-options-activity alert: likely
+    directional lean (bullish/bearish), whether it reads as speculative vs
+    hedging, and a possible catalyst (esp. if earnings are near). Explicitly
+    framed as inference from aggregate volume x price, not real order-flow
+    tagging -- the bot has no trade-level tape.
+    """
+    cp = "看涨期权(Call)" if option_type == "CALL" else "看跌期权(Put)"
+    signal_str = "、".join(signals) if signals else "无"
+    vol_oi = metrics.get("vol_oi_ratio")
+    parts = [
+        f"合约: {contract_label}（{cp}）",
+        f"触发信号: {signal_str}",
+        f"成交量: {metrics.get('volume')}",
+        f"持仓量: {metrics.get('open_interest')}",
+    ]
+    if vol_oi is not None:
+        parts.append(f"量/仓比: {vol_oi:.1f}")
+    if metrics.get("notional") is not None:
+        parts.append(f"名义成交额(估算): ${metrics['notional']:,.0f}")
+    if metrics.get("iv") is not None:
+        parts.append(f"隐含波动率: {metrics['iv']:.1f}%")
+    if metrics.get("iv_jump") is not None:
+        parts.append(f"IV变动: {metrics['iv_jump']:+.1f}")
+    if underlying_price is not None:
+        parts.append(f"正股现价: ${underlying_price:,.2f}")
+    if earnings_date:
+        parts.append(f"临近财报日: {earnings_date}")
+    data_block = "\n".join(parts)
+
+    prompt = (
+        "你是一名期权异动分析助手。以下是一条被系统标记为异常的美股期权活动数据。"
+        "请用中文给出简洁解读，不超过4条要点，每条不超过30字。\n\n"
+        "解读应包括：方向性倾向(看涨/看跌)、更像投机还是对冲、可能的催化剂"
+        "（若临近财报请指出）。\n\n"
+        "重要：名义成交额是用 成交量×价格×合约乘数 估算的，并非真实的大单/扫单逐笔数据，"
+        "解读时不要夸大为「机构大单」的确定性。不要提供投资建议。\n\n"
+        f"数据：\n{data_block}\n\n"
+        "请用简洁的中文bullet point列出。"
+    )
+    return await _call_deepseek([{"role": "user", "content": prompt}])
