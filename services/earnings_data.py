@@ -195,7 +195,7 @@ def _fetch_upcoming_from_nasdaq(ticker: str) -> dict | None:
         return None
     d = datetime.strptime(date_match.group(1), "%m/%d/%Y").date().isoformat()
 
-    eps_match = re.search(r"consensus EPS forecast for the quarter is \$(-?[\d.]+)", text)
+    eps_match = re.search(r"consensus EPS forecast for the quarter is \$(-?\d+\.\d+)", text)
     eps_e = float(eps_match.group(1)) if eps_match else None
 
     timing = None
