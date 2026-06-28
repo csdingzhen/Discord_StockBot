@@ -19,6 +19,7 @@ names are centralized in _normalize_option_row / _normalize_underlying_row so
 any field-name drift across SDK versions is a one-place fix.
 """
 import math
+import socket
 from datetime import date, timedelta
 
 import config
@@ -26,6 +27,20 @@ import config
 # Imported lazily inside _quote_context so the rest of the bot loads even when
 # moomoo-api isn't installed (e.g. the dev machine without OpenD).
 _moomoo = None
+
+# If OpenD isn't reachable, the SDK's OpenQuoteContext can block for a long
+# time trying to connect rather than failing fast -- which hangs whatever
+# command/loop is awaiting it. A cheap socket probe first turns that hang into
+# an immediate, clear error.
+_PORT_PROBE_TIMEOUT = 3.0
+
+
+def _port_reachable() -> bool:
+    try:
+        with socket.create_connection((config.MOOMOO_HOST, config.MOOMOO_PORT), timeout=_PORT_PROBE_TIMEOUT):
+            return True
+    except OSError:
+        return False
 
 
 def _load_moomoo():
@@ -70,6 +85,13 @@ class _QuoteContext:
 
     def __enter__(self):
         mm = _load_moomoo()
+        if not _port_reachable():
+            raise RuntimeError(
+                f"OpenD not reachable at {config.MOOMOO_HOST}:{config.MOOMOO_PORT} "
+                f"(socket probe failed within {_PORT_PROBE_TIMEOUT}s). "
+                "Is OpenD running and logged in? In Docker, set MOOMOO_HOST="
+                "host.docker.internal and make OpenD listen on 0.0.0.0."
+            )
         self._ctx = mm.OpenQuoteContext(host=config.MOOMOO_HOST, port=config.MOOMOO_PORT)
         return self._ctx
 
@@ -86,6 +108,12 @@ def check_health() -> tuple[bool, str]:
         mm = _load_moomoo()
     except Exception as e:
         return False, f"moomoo-api not installed: {e}"
+    if not _port_reachable():
+        return False, (
+            f"port {config.MOOMOO_HOST}:{config.MOOMOO_PORT} not reachable. "
+            "OpenD down/not logged in, or (Docker) container can't reach the host "
+            "— set MOOMOO_HOST=host.docker.internal and bind OpenD to 0.0.0.0."
+        )
     try:
         with _QuoteContext() as ctx:
             ret, data = ctx.get_global_state()
