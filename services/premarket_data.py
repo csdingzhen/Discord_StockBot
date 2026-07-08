@@ -14,11 +14,12 @@ Tracks:
 """
 import yfinance as yf
 
+from services.yf_session import SESSION
 from utils.constants import PREMARKET_TICKERS
 
 
 def _fetch_quote(symbol: str) -> dict:
-    info  = yf.Ticker(symbol).info
+    info  = yf.Ticker(symbol, session=SESSION).info
     price = info.get("regularMarketPrice") or info.get("currentPrice")
     prev  = info.get("previousClose") or info.get("regularMarketPreviousClose")
     return {"price": price, "prev_close": prev}

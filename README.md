@@ -93,3 +93,59 @@ trading-bot/
 - **新闻**: [NewsAPI](https://newsapi.org/)
 - **AI 分析**: [DeepSeek](https://www.deepseek.com/)
 - **快讯数据**: [金十数据 MCP](https://mcp.jin10.com/)
+
+---
+
+## 监控 / Monitoring (Grafana + Prometheus)
+
+The stack in `docker-compose.yml` runs the bot plus a self-contained
+monitoring environment on a shared `monitoring` network:
+
+- **bot** — exposes Prometheus metrics on `:9091` (in-network only) covering
+  Discord events/commands, gateway latency, and LLM requests/tokens/latency.
+- **prometheus** — scrapes the bot and `node_exporter`; history persists in
+  the `prometheus_data` volume.
+- **grafana** — dashboards at **http://localhost:3000**.
+- **node_exporter** — host/VM CPU, memory, disk.
+
+### Setup
+
+1. Add secrets to `.env` (copy from `.env.example` if you don't have one):
+
+   ```bash
+   cp .env.example .env   # then edit in your real keys
+   ```
+
+   `.env` is gitignored and injected at runtime — never commit real keys.
+
+2. Build and start everything:
+
+   ```bash
+   docker compose up -d --build
+   ```
+
+3. Open the UIs:
+   - **Grafana** → http://localhost:3000 (anonymous admin, no login) → dashboard
+     **“Discord Bot — System, Discord & LLM”** (auto-provisioned).
+   - **Prometheus** → http://localhost:9090
+
+### Verify the targets are healthy
+
+In Prometheus, go to **Status → Targets** (or hit the API):
+
+```bash
+curl -s http://localhost:9090/api/v1/targets | grep -o '"health":"[a-z]*"'
+```
+
+All targets (`discord_bot`, `node_exporter`, `prometheus`) should show
+`"health":"up"`. In Grafana, the panels start filling within ~15s once scrapes
+begin; trigger an `!analyze <TICKER>` to generate LLM/command activity.
+
+> **Note (Windows/Docker Desktop):** `node_exporter` reports the WSL2 Linux VM
+> that Docker runs in, not the Windows host directly — which is exactly the
+> "is the bot maxing out its container environment?" view.
+
+> **Editing dashboards:** you can edit visually in the Grafana GUI; changes save
+> to Grafana's DB (persisted in the `grafana_data` volume). To version-control a
+> change, export its JSON (Dashboard **Settings → JSON Model**) and overwrite
+> `grafana/provisioning/dashboards/bot-overview.json`.

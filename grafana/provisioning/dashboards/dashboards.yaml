@@ -1,0 +1,15 @@
+apiVersion: 1
+
+providers:
+  - name: "Bot dashboards"
+    orgId: 1
+    folder: ""
+    type: file
+    disableDeletion: false
+    # Let dashboards edited in the Grafana GUI be saved back to Grafana's DB
+    # (persisted in the grafana_data volume). To version-control a GUI change,
+    # export its JSON and overwrite the file in this folder.
+    allowUiUpdates: true
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/provisioning/dashboards

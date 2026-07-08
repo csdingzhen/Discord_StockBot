@@ -8,10 +8,17 @@ Targets the v4 model names directly: the legacy `deepseek-chat` /
 `deepseek-reasoner` aliases deprecate 2026-07-24.
 """
 import json
+import time
 
 import aiohttp
 
 import config
+from services.metrics import (
+    llm_request_duration_seconds,
+    llm_requests_total,
+    llm_tokens_total,
+    record_llm_cost,
+)
 
 _DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 _DEEPSEEK_MODEL = "deepseek-v4-flash"
@@ -31,12 +38,30 @@ async def _call_deepseek(messages: list[dict], response_format: dict | None = No
         "Authorization": f"Bearer {config.DEEPSEEK_API_KEY}",
         "Content-Type": "application/json",
     }
-    async with aiohttp.ClientSession() as session:
-        async with session.post(_DEEPSEEK_URL, headers=headers, json=payload) as resp:
-            body = await resp.json()
-            if resp.status != 200:
-                raise RuntimeError(f"DeepSeek API error {resp.status}: {body}")
-            return body["choices"][0]["message"]["content"]
+    # Instrumentation: status defaults to "error" and is flipped to "success"
+    # only on a clean 200 return, so any exception path (network, non-200,
+    # JSON/parse) is counted as an error exactly once by the finally block.
+    start = time.perf_counter()
+    status = "error"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(_DEEPSEEK_URL, headers=headers, json=payload) as resp:
+                body = await resp.json()
+                if resp.status != 200:
+                    raise RuntimeError(f"DeepSeek API error {resp.status}: {body}")
+                usage = body.get("usage") or {}
+                prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+                completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+                if prompt_tokens:
+                    llm_tokens_total.labels(model=_DEEPSEEK_MODEL, direction="prompt").inc(prompt_tokens)
+                if completion_tokens:
+                    llm_tokens_total.labels(model=_DEEPSEEK_MODEL, direction="completion").inc(completion_tokens)
+                record_llm_cost(_DEEPSEEK_MODEL, prompt_tokens, completion_tokens)
+                status = "success"
+                return body["choices"][0]["message"]["content"]
+    finally:
+        llm_request_duration_seconds.labels(model=_DEEPSEEK_MODEL).observe(time.perf_counter() - start)
+        llm_requests_total.labels(model=_DEEPSEEK_MODEL, status=status).inc()
 
 
 # ---------------------------------------------------------------------------

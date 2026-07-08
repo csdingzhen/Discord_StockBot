@@ -19,6 +19,7 @@ import requests
 import yfinance as yf
 
 from config import FRED_API_KEY
+from services.yf_session import SESSION
 from utils.constants import (
     MACRO_DASHBOARD_YFINANCE,
     MACRO_DASHBOARD_FRED,
@@ -36,7 +37,7 @@ def _yf_quote(symbol: str) -> dict:
     raw_change = price - prev_close  (useful for pp-change display on yields).
     """
     try:
-        info  = yf.Ticker(symbol).info
+        info  = yf.Ticker(symbol, session=SESSION).info
         price = info.get("regularMarketPrice") or info.get("currentPrice")
         prev  = info.get("previousClose") or info.get("regularMarketPreviousClose")
         if price is None:
