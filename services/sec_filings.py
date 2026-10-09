@@ -16,13 +16,14 @@ No API key needed.
 """
 import re
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 from bs4 import BeautifulSoup
 
 import config
 from storage import sec_store
+from utils.market_time import market_today
 
 _HEADERS = {"User-Agent": config.SEC_EDGAR_USER_AGENT}
 _TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -78,7 +79,7 @@ def fetch_new_earnings_filings(watchlist: set, lookback_days: int = 2) -> list[d
     (already persisted via sec_store.save_filing) as a list of dicts:
     {ticker, cik, accession_number, form_type, items, filing_date, primary_document}.
     """
-    cutoff = (date.today() - timedelta(days=lookback_days)).isoformat()
+    cutoff = (market_today() - timedelta(days=lookback_days)).isoformat()
     new_filings = []
 
     for ticker in sorted(watchlist):

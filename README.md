@@ -179,25 +179,65 @@ Discord_StockBot/
 
 ---
 
-## 部署 / Deployment
+## 数据来源 / Data Sources
 
-支持 Docker（`docker-compose.yml` 含日志轮转、`./data` 卷持久化、`restart: unless-stopped`）：
-
-```bash
-docker compose up -d --build
-```
-
-注意：`env_file` 只在容器**创建**时读取——修改 `.env` 后需 `docker compose up -d --force-recreate` 才会生效。
-
-### moomoo OpenD（期权异动功能）
-1. 下载并运行 moomoo OpenD，登录账户（需美股期权 L1 行情权限）。
-2. `MOOMOO_ENABLED=true`。
-3. **Docker 场景**：让 OpenD 监听 `0.0.0.0:11111`，`.env` 设 `MOOMOO_HOST=host.docker.internal`，容器需能访问宿主机；用 `!optionhealth` 验证连接。
+- **股票 / 加密 / 期权**: [Yahoo Finance](https://finance.yahoo.com/) via `yfinance`
+- **新闻**: [NewsAPI](https://newsapi.org/)
+- **AI 分析**: [DeepSeek](https://www.deepseek.com/)
+- **快讯数据**: [金十数据 MCP](https://mcp.jin10.com/)
 
 ---
 
-## 开发笔记 / Notes
+## 监控 / Monitoring (Grafana + Prometheus)
 
-- **AI 全部走 DeepSeek** — 已完全移除 Anthropic Claude。
-- **存储用 SQLite** — 各表在对应 cog 加载时自动建表 (`CREATE TABLE IF NOT EXISTS`)；`.env` 与 `data/bot.db` 不入库。
-- **watchlist 与阈值** 集中在 `utils/constants.py`（`EARNINGS_WATCHLIST` / `OPTIONS_WATCHLIST` 及各类信号阈值）。
+The stack in `docker-compose.yml` runs the bot plus a self-contained
+monitoring environment on a shared `monitoring` network:
+
+- **bot** — exposes Prometheus metrics on `:9091` (in-network only) covering
+  Discord events/commands, gateway latency, and LLM requests/tokens/latency.
+- **prometheus** — scrapes the bot and `node_exporter`; history persists in
+  the `prometheus_data` volume.
+- **grafana** — dashboards at **http://localhost:3000**.
+- **node_exporter** — host/VM CPU, memory, disk.
+
+### Setup
+
+1. Add secrets to `.env` (copy from `.env.example` if you don't have one):
+
+   ```bash
+   cp .env.example .env   # then edit in your real keys
+   ```
+
+   `.env` is gitignored and injected at runtime — never commit real keys.
+
+2. Build and start everything:
+
+   ```bash
+   docker compose up -d --build
+   ```
+
+3. Open the UIs:
+   - **Grafana** → http://localhost:3000 (anonymous admin, no login) → dashboard
+     **“Discord Bot — System, Discord & LLM”** (auto-provisioned).
+   - **Prometheus** → http://localhost:9090
+
+### Verify the targets are healthy
+
+In Prometheus, go to **Status → Targets** (or hit the API):
+
+```bash
+curl -s http://localhost:9090/api/v1/targets | grep -o '"health":"[a-z]*"'
+```
+
+All targets (`discord_bot`, `node_exporter`, `prometheus`) should show
+`"health":"up"`. In Grafana, the panels start filling within ~15s once scrapes
+begin; trigger an `!analyze <TICKER>` to generate LLM/command activity.
+
+> **Note (Windows/Docker Desktop):** `node_exporter` reports the WSL2 Linux VM
+> that Docker runs in, not the Windows host directly — which is exactly the
+> "is the bot maxing out its container environment?" view.
+
+> **Editing dashboards:** you can edit visually in the Grafana GUI; changes save
+> to Grafana's DB (persisted in the `grafana_data` volume). To version-control a
+> change, export its JSON (Dashboard **Settings → JSON Model**) and overwrite
+> `grafana/provisioning/dashboards/bot-overview.json`.

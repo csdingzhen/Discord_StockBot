@@ -14,9 +14,8 @@ import json
 import discord
 import requests
 from discord.ext import commands, tasks
-from datetime import time, date, timedelta
+from datetime import time, timedelta
 
-from zoneinfo import ZoneInfo
 import pandas_market_calendars as mcal
 
 import config
@@ -26,6 +25,7 @@ from services.llm_client import analyze_premarket, analyze_earnings_reaction, an
 from services.earnings_data import fetch_weekly_calendar, fetch_todays_results
 from services.sec_filings import fetch_new_earnings_filings, fetch_ex99_text
 from storage import sec_store
+from utils.market_time import ET, market_today
 from utils.formatters import beat_miss_str, change_emoji, format_large_number, make_embed
 from utils.constants import (
     EARNINGS_WATCHLIST,
@@ -39,9 +39,6 @@ from utils.constants import (
     CNN_FEAR_GREED_HEADERS,
 )
 
-ET = ZoneInfo("America/New_York")
-
-
 # ------------------------------------------------------------------
 # Calendar helpers
 # ------------------------------------------------------------------
@@ -49,7 +46,7 @@ ET = ZoneInfo("America/New_York")
 def _nyse_schedule_today():
     """Return today's NYSE schedule row, or None if the market is closed."""
     nyse = mcal.get_calendar("NYSE")
-    today = date.today().strftime("%Y-%m-%d")
+    today = market_today().isoformat()
     schedule = nyse.schedule(start_date=today, end_date=today)
     return None if schedule.empty else schedule.iloc[0]
 
@@ -317,7 +314,7 @@ class Scheduler(commands.Cog):
 
         entries = await asyncio.to_thread(fetch_weekly_calendar, EARNINGS_WATCHLIST)
 
-        today = date.today()
+        today = market_today()
         monday = today - timedelta(days=today.weekday())
         friday = monday + timedelta(days=4)
 
@@ -362,7 +359,7 @@ class Scheduler(commands.Cog):
 
     @tasks.loop(time=time(9, 0, tzinfo=ET))
     async def weekly_earnings_update(self):
-        if not market_open_today() or date.today().weekday() != 0:
+        if not market_open_today() or market_today().weekday() != 0:
             return
         await self._send_weekly_earnings()
 
@@ -383,7 +380,7 @@ class Scheduler(commands.Cog):
             return
 
         results = await asyncio.to_thread(fetch_todays_results, EARNINGS_WATCHLIST)
-        today_str = date.today().isoformat()
+        today_str = market_today().isoformat()
         covered_syms = {r.get("symbol") for r in results}
 
         # Tickers with an analyzed SEC filing today that FMP hasn't caught up

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 import discord
 import config
 
@@ -63,7 +63,7 @@ def make_embed(
         title=title,
         description=description,
         color=color,
-        timestamp=datetime.utcnow(),
+        timestamp=datetime.now(timezone.utc),
     )
     embed.set_footer(text=config.DATA_FOOTER)
     return embed

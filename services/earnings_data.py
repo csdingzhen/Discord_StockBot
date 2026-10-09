@@ -20,6 +20,7 @@ import requests
 from datetime import date, datetime, timedelta
 
 from config import FMP_API_KEY
+from utils.market_time import market_today
 
 _BASE = "https://financialmodelingprep.com/stable"
 
@@ -39,7 +40,7 @@ def _fmp_get(path: str, params: dict = None) -> list:
 
 
 def _week_bounds() -> tuple[str, str]:
-    today = date.today()
+    today = market_today()
     monday = today - timedelta(days=today.weekday())
     friday = monday + timedelta(days=4)
     return monday.isoformat(), friday.isoformat()
@@ -136,7 +137,7 @@ def fetch_todays_results(watchlist: set = None) -> list[dict]:
     merging FMP and Nasdaq's calendars for the same gap-filling reason as
     fetch_weekly_calendar(). Filters to watchlist symbols when provided.
     """
-    today = date.today().isoformat()
+    today = market_today().isoformat()
     try:
         fmp_data = _fmp_get("/earnings-calendar", {"from": today, "to": today})
         if not isinstance(fmp_data, list):
@@ -154,7 +155,7 @@ def fetch_todays_results(watchlist: set = None) -> list[dict]:
 def _fetch_upcoming_from_fmp(ticker: str) -> dict | None:
     """Next upcoming earnings entry for a ticker, via FMP's forward range
     calendar (never gated, unlike the per-symbol endpoint)."""
-    today = date.today()
+    today = market_today()
     start = today.isoformat()
     end = (today + timedelta(days=95)).isoformat()
     try:

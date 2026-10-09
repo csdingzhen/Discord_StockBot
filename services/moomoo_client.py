@@ -20,9 +20,10 @@ any field-name drift across SDK versions is a one-place fix.
 """
 import math
 import socket
-from datetime import date, timedelta
+from datetime import timedelta
 
 import config
+from utils.market_time import market_today
 
 # Imported lazily inside _quote_context so the rest of the bot loads even when
 # moomoo-api isn't installed (e.g. the dev machine without OpenD).
@@ -145,7 +146,7 @@ def build_universe(ticker: str) -> list[str]:
     mm = _load_moomoo()
     code = _us_code(ticker)
     codes: list[str] = []
-    today = date.today()
+    today = market_today()
     horizon = (today + timedelta(days=OPTIONS_CHAIN_DTE_MAX)).isoformat()
 
     with _QuoteContext() as ctx:

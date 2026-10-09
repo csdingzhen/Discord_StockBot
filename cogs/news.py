@@ -15,15 +15,13 @@ from datetime import time
 
 import discord
 from discord.ext import commands, tasks
-from zoneinfo import ZoneInfo
 
 import config
 from cogs.scheduler import market_open_today
 from services import llm_client
 from services.jin10_mcp import Jin10MCPClient
 from storage import jin10_store
-
-ET = ZoneInfo("America/New_York")
+from utils.market_time import ET
 
 # Jin10 itself publishes pre-aggregated roundups (e.g. "每日科技要闻速递", or a
 # single flash with "国内新闻：" / "国际新闻：" sections listing many unrelated

@@ -12,19 +12,17 @@ moomoo SDK calls run via asyncio.to_thread; scoring is pure (services.options_sc
 """
 import asyncio
 import json
-from datetime import date, datetime, time
+from datetime import time
 
 import discord
 from discord.ext import commands, tasks
-from zoneinfo import ZoneInfo
 
 import config
 from cogs.scheduler import market_open_today
 from services import llm_client, moomoo_client, options_scan
 from storage import options_store
 from utils.constants import OPTIONS_WATCHLIST
-
-ET = ZoneInfo("America/New_York")
+from utils.market_time import ET, market_now, market_today
 
 # Regular US options session (plus a few minutes past the close for late
 # prints). Scanning outside this window just re-reads stale cumulative volume.
@@ -33,7 +31,7 @@ _MARKET_CLOSE = time(16, 15)
 
 
 def _within_market_hours() -> bool:
-    now = datetime.now(ET).time()
+    now = market_now().time()
     return _MARKET_OPEN <= now <= _MARKET_CLOSE
 
 # Intraday roll-ups of L2 flow, plus an end-of-session wrap.
@@ -80,7 +78,7 @@ class OptionsFlow(commands.Cog):
     # ------------------------------------------------------------------
 
     async def _get_universe(self, ticker: str) -> list[str]:
-        today = date.today().isoformat()
+        today = market_today().isoformat()
         if self._universe_date != today:
             self._universe = {}
             self._universe_date = today
@@ -105,7 +103,7 @@ class OptionsFlow(commands.Cog):
         await self._run_scan()
 
     async def _run_scan(self):
-        today = date.today().isoformat()
+        today = market_today().isoformat()
         l3_posted = 0
         successes = 0
 
@@ -250,7 +248,7 @@ class OptionsFlow(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def _post_digest(self):
-        today = date.today().isoformat()
+        today = market_today().isoformat()
         pending = await asyncio.to_thread(options_store.get_pending_digest, today)
         if not pending:
             return
@@ -323,7 +321,7 @@ class OptionsFlow(commands.Cog):
             underlying_price, snaps = await asyncio.to_thread(
                 moomoo_client.fetch_ticker_snapshots, ticker, codes
             )
-            today = date.today().isoformat()
+            today = market_today().isoformat()
             prior_iv = await asyncio.to_thread(options_store.get_prior_iv_map, ticker, today)
             vol_baseline = await asyncio.to_thread(options_store.get_volume_baseline, ticker, today)
             anomalies = options_scan.detect_anomalies(snaps, prior_iv, vol_baseline)
