@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import math
 import time
 
@@ -107,6 +108,7 @@ async def _before_latency_loop():
 
 
 async def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     start_metrics_server()
     _update_latency.start()
     async with bot:

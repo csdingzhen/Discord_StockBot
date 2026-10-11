@@ -229,8 +229,11 @@ class OptionsFlow(commands.Cog):
         embed.add_field(name="数据", value="\n".join(stats), inline=False)
 
         if ai_block:
-            embed.add_field(name="🤖 解读", value=ai_block, inline=False)
-        embed.set_footer(text="名义成交额为 量×价×乘数 估算，非真实大单逐笔数据")
+            embed.add_field(name="🤖 解读", value=ai_block[:1024], inline=False)
+        footer = "名义成交额为 量×价×乘数 估算，非真实大单逐笔数据"
+        if ai_block is None:
+            footer += f"\n{llm_client.FAILURE_NOTICE}"
+        embed.set_footer(text=footer)
         await channel.send(embed=embed)
 
     # ------------------------------------------------------------------

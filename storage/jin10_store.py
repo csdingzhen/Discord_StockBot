@@ -78,13 +78,28 @@ def mark_l3_posted(url: str):
         conn.close()
 
 
-def get_pending_l2_items() -> list[dict]:
+def get_pending_l2_items(limit: int = 100) -> list[dict]:
     """Level-2 items not yet rolled into a digest, oldest first."""
     conn = get_connection()
     try:
         rows = conn.execute(
             "SELECT url, time, content, category FROM jin10_flash "
-            "WHERE level = 2 AND digested = 0 ORDER BY time ASC"
+            "WHERE level = 2 AND digested = 0 ORDER BY time ASC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_pending_l3_items() -> list[dict]:
+    # Old versions also left suppressed alerts unposted. Never replay that history.
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=45)).isoformat()
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT url, time, content, category FROM jin10_flash "
+            "WHERE level = 3 AND posted_l3 = 0 AND digested = 0 AND fetched_at >= ? "
+            "ORDER BY time ASC LIMIT 20", (cutoff,)
         ).fetchall()
         return [dict(row) for row in rows]
     finally:

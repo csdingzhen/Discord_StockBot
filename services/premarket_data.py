@@ -12,6 +12,8 @@ Tracks:
   - 10-Year Treasury Yield (^TNX)
   - Derived: Gold / Brent ratio (geopolitical risk gauge)
 """
+import logging
+
 import yfinance as yf
 
 from services.yf_session import SESSION
@@ -33,7 +35,11 @@ def fetch_premarket_snapshot() -> dict:
     """
     snapshot = {}
     for label, sym in PREMARKET_TICKERS.items():
-        q = _fetch_quote(sym)
+        try:
+            q = _fetch_quote(sym)
+        except Exception:
+            logging.getLogger(__name__).exception("Pre-market quote failed for %s", sym)
+            q = {"price": None, "prev_close": None}
         price, prev = q["price"], q["prev_close"]
         pct = (price - prev) / prev * 100 if price and prev else None
         snapshot[label] = {"price": price, "prev_close": prev, "pct_change": pct}

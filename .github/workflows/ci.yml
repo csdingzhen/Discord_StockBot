@@ -1,0 +1,41 @@
+name: Bot CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 15 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bot-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHON_DOTENV_DISABLED: '1'
+      DISCORD_TOKEN: ''
+      OPENROUTER_API_KEY: ''
+      JIN10_API_KEY: ''
+      MOOMOO_ENABLED: 'false'
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install runtime dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Check dependency consistency
+        run: python -m pip check
+      - name: Offline unit and integration tests
+        run: python -m unittest discover -s tests -v
+      - name: Build production image (do not run or publish)
+        run: docker build --tag discord-stockbot:ci .

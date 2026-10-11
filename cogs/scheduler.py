@@ -10,6 +10,7 @@ Set MARKET_CHANNEL_ID in .env to enable.
 """
 import asyncio
 import json
+import logging
 
 import discord
 import requests
@@ -21,7 +22,7 @@ import pandas_market_calendars as mcal
 import config
 from services.market_data import get_ticker_info
 from services.premarket_data import fetch_premarket_snapshot, build_data_summary
-from services.llm_client import analyze_premarket, analyze_earnings_reaction, analyze_sec_filing
+from services.llm_client import FAILURE_NOTICE, analyze_premarket, analyze_earnings_reaction, analyze_sec_filing
 from services.earnings_data import fetch_weekly_calendar, fetch_todays_results
 from services.sec_filings import fetch_new_earnings_filings, fetch_ex99_text
 from storage import sec_store
@@ -38,6 +39,18 @@ from utils.constants import (
     CNN_FEAR_GREED_URL,
     CNN_FEAR_GREED_HEADERS,
 )
+
+_log = logging.getLogger(__name__)
+
+
+async def _run_scheduled(name, action):
+    # A non-reconnectable exception otherwise permanently stops discord.py's loop.
+    try:
+        _log.info("Scheduled job starting: %s", name)
+        await action()
+        _log.info("Scheduled job finished: %s", name)
+    except Exception:
+        _log.exception("Scheduled job failed: %s; next scheduled run remains enabled", name)
 
 # ------------------------------------------------------------------
 # Calendar helpers
@@ -70,17 +83,15 @@ def is_early_close_today() -> bool:
 # ------------------------------------------------------------------
 
 def fetch_fear_and_greed():
-    """Return (score, rating) from the CNN Fear & Greed index, or a fallback string."""
+    """Return (score, rating), or (None, unavailable) without blocking the summary."""
     try:
-        response = requests.get(CNN_FEAR_GREED_URL, headers=CNN_FEAR_GREED_HEADERS)
+        response = requests.get(CNN_FEAR_GREED_URL, headers=CNN_FEAR_GREED_HEADERS, timeout=15)
+        response.raise_for_status()
         data = response.json()
+        return float(data["fear_and_greed"]["score"]), data["fear_and_greed"]["rating"]
     except Exception:
-        data = None
-    if not data:
-        return "Information Not Available"
-    score  = data["fear_and_greed"]["score"]
-    rating = data["fear_and_greed"]["rating"]
-    return score, rating
+        _log.exception("CNN Fear & Greed unavailable")
+        return None, "unavailable"
 
 
 # ------------------------------------------------------------------
@@ -148,7 +159,11 @@ class Scheduler(commands.Cog):
         embed = make_embed("\U0001f4ca Daily Market Summary", color=discord.Color.blurple())
         lines = []
         for label, sym in INDICES.items():
-            info       = get_ticker_info(sym)
+            try:
+                info = await asyncio.to_thread(get_ticker_info, sym)
+            except Exception:
+                _log.exception("Market quote unavailable: %s", sym)
+                info = {}
             price      = info.get("regularMarketPrice") or info.get("currentPrice")
             prev_close = info.get("previousClose") or info.get("regularMarketPreviousClose")
             if price and prev_close:
@@ -158,8 +173,9 @@ class Scheduler(commands.Cog):
                 lines.append(f"**{label}**  {icon} {price:,.2f}  ({sign}{pct:.2f}%)")
             else:
                 lines.append(f"**{label}** \u2014 unavailable")
-        fear_and_greed = fetch_fear_and_greed()
-        lines.append(f"**CNN Fear & Greed Index** {fear_and_greed[0]:,.2f} {fear_and_greed[1]}")
+        score, rating = await asyncio.to_thread(fetch_fear_and_greed)
+        score_text = f"{score:,.2f} {rating}" if score is not None else "unavailable"
+        lines.append(f"**CNN Fear & Greed Index** {score_text}")
         embed.description = "\n".join(lines)
         await channel.send(embed=embed)
 
@@ -170,9 +186,11 @@ class Scheduler(commands.Cog):
     async def _send_premarket_brief(self):
         channel_id = config.MARKET_CHANNEL_ID
         if not channel_id:
+            _log.warning("Pre-market skipped: MARKET_CHANNEL_ID is not set")
             return
         channel = self.bot.get_channel(channel_id)
         if channel is None:
+            _log.warning("Pre-market skipped: market channel %s is unavailable", channel_id)
             return
 
         snapshot = await asyncio.to_thread(fetch_premarket_snapshot)
@@ -213,12 +231,19 @@ class Scheduler(commands.Cog):
             )
 
         data_summary = build_data_summary(snapshot)
-        analysis     = await analyze_premarket(data_summary)
-
-        lines.append(f"\n**🤖 AI分析**\n{analysis}")
+        llm_failed = False
+        try:
+            analysis = await analyze_premarket(data_summary)
+            remaining = max(0, 4096 - len("\n".join(lines)) - 20)
+            lines.append(f"\n**🤖 AI分析**\n{analysis[:remaining]}")
+        except Exception as exc:
+            _log.warning("Pre-market LLM failed; sending basic snapshot: %s", exc)
+            llm_failed = True
 
         embed = make_embed("📊 Pre-Market Briefing 盘前简报", color=discord.Color.orange())
         embed.description = "\n".join(lines)
+        if llm_failed:
+            embed.set_footer(text=f"{config.DATA_FOOTER}\n{FAILURE_NOTICE}")
         await channel.send(embed=embed)
 
     # ------------------------------------------------------------------
@@ -264,7 +289,7 @@ class Scheduler(commands.Cog):
     async def premarket_update(self):
         if not market_open_today():
             return
-        await self._send_premarket_brief()
+        await _run_scheduled("premarket", self._send_premarket_brief)
 
     @premarket_update.before_loop
     async def before_premarket(self):
@@ -279,7 +304,7 @@ class Scheduler(commands.Cog):
     async def normal_close_update(self):
         if not market_open_today() or is_early_close_today():
             return
-        await self._send_summary()
+        await _run_scheduled("normal close", self._send_summary)
 
     @normal_close_update.before_loop
     async def before_normal_close(self):
@@ -294,7 +319,7 @@ class Scheduler(commands.Cog):
     async def early_close_update(self):
         if not market_open_today() or not is_early_close_today():
             return
-        await self._send_summary()
+        await _run_scheduled("early close", self._send_summary)
 
     @early_close_update.before_loop
     async def before_early_close(self):
@@ -361,7 +386,7 @@ class Scheduler(commands.Cog):
     async def weekly_earnings_update(self):
         if not market_open_today() or market_today().weekday() != 0:
             return
-        await self._send_weekly_earnings()
+        await _run_scheduled("weekly earnings", self._send_weekly_earnings)
 
     @weekly_earnings_update.before_loop
     async def before_weekly_earnings(self):
@@ -400,6 +425,7 @@ class Scheduler(commands.Cog):
             return
 
         embed = make_embed("📊 今日财报结果 Today's Earnings Results", color=discord.Color.blurple())
+        llm_failed = False
 
         field_count = 0
         for r in results:
@@ -431,6 +457,7 @@ class Scheduler(commands.Cog):
                         value_lines.append(f"🤖 {reaction}")
                     except Exception as e:
                         print(f"[scheduler] earnings reaction analysis failed for {sym}: {e}")
+                        llm_failed = True
 
             filing = await asyncio.to_thread(
                 sec_store.get_analyzed_filing_for_ticker_date, sym, today_str
@@ -456,13 +483,15 @@ class Scheduler(commands.Cog):
             embed.add_field(name=sym, value=value, inline=False)
             field_count += 1
 
+        if llm_failed:
+            embed.set_footer(text=f"{config.DATA_FOOTER}\n部分 LLM API 调用失败，相关基础财报数据仍保留。")
         await channel.send(embed=embed)
 
     @tasks.loop(time=time(17, 30, tzinfo=ET))
     async def aftermarket_earnings_update(self):
         if not market_open_today():
             return
-        await self._send_todays_earnings()
+        await _run_scheduled("aftermarket earnings", self._send_todays_earnings)
 
     @aftermarket_earnings_update.before_loop
     async def before_aftermarket_earnings(self):
@@ -492,7 +521,7 @@ class Scheduler(commands.Cog):
     async def sec_filing_poll(self):
         if not market_open_today():
             return
-        await self._run_sec_filing_poll()
+        await _run_scheduled("SEC filings", self._run_sec_filing_poll)
 
     @sec_filing_poll.before_loop
     async def before_sec_filing_poll(self):

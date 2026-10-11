@@ -1,12 +1,15 @@
 """
 analysis.py — LLM-powered technical analysis commands.
 Commands: !analyze <TICKER>
-Requires DEEPSEEK_API_KEY in .env.
+Requires OPENROUTER_API_KEY for AI analysis; quotes remain available without it.
 """
+import asyncio
+import logging
+
 from discord.ext import commands
 
 from services.market_data import get_ticker_info
-from services.llm_client import analyze_ticker
+from services.llm_client import FAILURE_NOTICE, analyze_ticker
 from utils.formatters import format_large_number, make_embed
 
 
@@ -23,7 +26,7 @@ class Analysis(commands.Cog):
             return
         ticker = ticker.upper()
         async with ctx.typing():
-            info = get_ticker_info(ticker)
+            info = await asyncio.to_thread(get_ticker_info, ticker)
             name       = info.get("longName") or info.get("shortName") or ticker
             price      = info.get("currentPrice")    or info.get("regularMarketPrice")
             prev_close = info.get("previousClose")   or info.get("regularMarketPreviousClose")
@@ -41,9 +44,18 @@ class Analysis(commands.Cog):
                 f"Market Cap: {format_large_number(market_cap)}\n"
                 f"P/E Ratio: {pe_ratio}\n"
             )
-            analysis = await analyze_ticker(ticker, price_summary)
+            llm_failed = False
+            try:
+                analysis = await analyze_ticker(ticker, price_summary)
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Ticker analysis failed: %s", exc)
+                analysis = price_summary
+                llm_failed = True
 
-        embed = make_embed(f"\U0001f916 AI Analysis: {ticker}", analysis)
+        title = f"Market Data: {ticker}" if llm_failed else f"\U0001f916 AI Analysis: {ticker}"
+        embed = make_embed(title, analysis[:4096])
+        if llm_failed:
+            embed.set_footer(text=FAILURE_NOTICE)
         await ctx.send(embed=embed)
 
 

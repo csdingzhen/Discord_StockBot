@@ -1,12 +1,10 @@
 """
-llm_client.py — DeepSeek API wrapper for all LLM-powered features:
+llm_client.py — OpenRouter wrapper for all LLM-powered features:
 ticker technical analysis, pre-market macro briefing, and the Jin10
 flash-news pipeline (classification + summarization).
-Requires DEEPSEEK_API_KEY in .env.
-
-Targets the v4 model names directly: the legacy `deepseek-chat` /
-`deepseek-reasoner` aliases deprecate 2026-07-24.
+Requires OPENROUTER_API_KEY; LLM_MODEL selects the provider/model slug.
 """
+import asyncio
 import json
 import time
 
@@ -20,48 +18,105 @@ from services.metrics import (
     record_llm_cost,
 )
 
-_DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
-_DEEPSEEK_MODEL = "deepseek-v4-flash"
+_OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+FAILURE_NOTICE = "LLM API 调用失败，仅展示基础数据，未提供 AI 分析。"
+_cooldown_until = 0.0
+_cooldown_identity = None
+_cooldown_reason = ""
 
-_NOT_CONFIGURED_MSG = (
-    "LLM analysis is not configured. Set `DEEPSEEK_API_KEY` in your `.env` file."
-)
+
+class LLMError(RuntimeError):
+    """Safe to log: never includes credentials, prompts, or provider bodies."""
+
+    def __init__(self, reason: str, status: int | None = None):
+        self.reason = reason
+        self.status = status
+        super().__init__(f"OpenRouter: {reason}" + (f" (HTTP {status})" if status else ""))
 
 
-async def _call_deepseek(messages: list[dict], response_format: dict | None = None) -> str:
-    if not config.DEEPSEEK_API_KEY:
-        raise RuntimeError("DEEPSEEK_API_KEY is not configured in .env")
-    payload = {"model": _DEEPSEEK_MODEL, "messages": messages}
+async def _call_llm(messages: list[dict], response_format: dict | None = None) -> str:
+    global _cooldown_until, _cooldown_identity, _cooldown_reason
+    if not config.OPENROUTER_API_KEY:
+        raise LLMError("OPENROUTER_API_KEY is not configured")
+    model = config.LLM_MODEL
+    identity = (config.OPENROUTER_API_KEY, model)
+    if identity == _cooldown_identity and time.monotonic() < _cooldown_until:
+        raise LLMError(f"temporarily disabled after {_cooldown_reason}")
+    payload = {
+        "model": model, "messages": messages, "stream": False,
+        "max_tokens": config.LLM_MAX_TOKENS,
+        "reasoning": {"enabled": config.LLM_REASONING_ENABLED},
+    }
     if response_format:
         payload["response_format"] = response_format
+        payload["provider"] = {"require_parameters": True}
     headers = {
-        "Authorization": f"Bearer {config.DEEPSEEK_API_KEY}",
+        "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
+        "X-OpenRouter-Title": "Discord StockBot",
     }
-    # Instrumentation: status defaults to "error" and is flipped to "success"
-    # only on a clean 200 return, so any exception path (network, non-200,
-    # JSON/parse) is counted as an error exactly once by the finally block.
     start = time.perf_counter()
     status = "error"
+    cooldown = 60.0
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(_DEEPSEEK_URL, headers=headers, json=payload) as resp:
-                body = await resp.json()
+        timeout = aiohttp.ClientTimeout(total=config.LLM_TIMEOUT_SECONDS)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(_OPENROUTER_URL, headers=headers, json=payload) as resp:
                 if resp.status != 200:
-                    raise RuntimeError(f"DeepSeek API error {resp.status}: {body}")
+                    reason = {
+                        401: "invalid API key", 402: "insufficient credits or spending limit",
+                        403: "permission or budget denied", 429: "rate limited",
+                    }.get(resp.status, "request rejected")
+                    cooldown = 300.0 if resp.status in (401, 402, 403) else 60.0
+                    try:
+                        cooldown = max(cooldown, float(resp.headers.get("Retry-After", "0")))
+                    except ValueError:
+                        pass
+                    raise LLMError(reason, resp.status)
+                try:
+                    body = await resp.json(content_type=None)
+                except (ValueError, UnicodeError) as exc:
+                    raise LLMError("invalid JSON response") from exc
+                if not isinstance(body, dict) or body.get("error"):
+                    raise LLMError("provider returned an error response")
                 usage = body.get("usage") or {}
-                prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
-                completion_tokens = int(usage.get("completion_tokens", 0) or 0)
-                if prompt_tokens:
-                    llm_tokens_total.labels(model=_DEEPSEEK_MODEL, direction="prompt").inc(prompt_tokens)
-                if completion_tokens:
-                    llm_tokens_total.labels(model=_DEEPSEEK_MODEL, direction="completion").inc(completion_tokens)
-                record_llm_cost(_DEEPSEEK_MODEL, prompt_tokens, completion_tokens)
+                # Account for billed tokens even if the model's output is unusable.
+                if isinstance(usage, dict):
+                    prompt_tokens = _token_count(usage.get("prompt_tokens"))
+                    completion_tokens = _token_count(usage.get("completion_tokens"))
+                    llm_tokens_total.labels(model=model, direction="prompt").inc(prompt_tokens)
+                    llm_tokens_total.labels(model=model, direction="completion").inc(completion_tokens)
+                    record_llm_cost(model, prompt_tokens, completion_tokens, usage.get("cost"))
+                try:
+                    choice = body["choices"][0]
+                    content = choice["message"]["content"]
+                    if choice.get("error") or choice.get("finish_reason") in ("error", "length", "content_filter"):
+                        raise ValueError("incomplete response")
+                    if not isinstance(content, str) or not content.strip():
+                        raise ValueError("empty response")
+                    if response_format and not isinstance(json.loads(content), dict):
+                        raise ValueError("expected JSON object")
+                except (KeyError, IndexError, TypeError, ValueError) as exc:
+                    raise LLMError("invalid or incomplete model output") from exc
                 status = "success"
-                return body["choices"][0]["message"]["content"]
+                return content.strip()
+    except (LLMError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        error = exc if isinstance(exc, LLMError) else LLMError(type(exc).__name__)
+        # Do not retry billable requests or hammer an exhausted account per news item.
+        _cooldown_identity = identity
+        _cooldown_until = time.monotonic() + cooldown
+        _cooldown_reason = error.reason
+        raise error from None
     finally:
-        llm_request_duration_seconds.labels(model=_DEEPSEEK_MODEL).observe(time.perf_counter() - start)
-        llm_requests_total.labels(model=_DEEPSEEK_MODEL, status=status).inc()
+        llm_request_duration_seconds.labels(model=model).observe(time.perf_counter() - start)
+        llm_requests_total.labels(model=model, status=status).inc()
+
+
+def _token_count(value) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -70,8 +125,6 @@ async def _call_deepseek(messages: list[dict], response_format: dict | None = No
 
 async def analyze_ticker(ticker: str, price_summary: str) -> str:
     """Returns a plain-text technical analysis string for one ticker."""
-    if not config.DEEPSEEK_API_KEY:
-        return _NOT_CONFIGURED_MSG
     prompt = (
         f"You are a financial analyst assistant. Provide a brief technical "
         f"analysis for {ticker} based on the following data:\n\n"
@@ -79,7 +132,7 @@ async def analyze_ticker(ticker: str, price_summary: str) -> str:
         "Keep your response under 200 words. Focus on key support/resistance "
         "levels, momentum, and a short-term outlook."
     )
-    return await _call_deepseek([{"role": "user", "content": prompt}])
+    return await _call_llm([{"role": "user", "content": prompt}])
 
 
 # ---------------------------------------------------------------------------
@@ -88,8 +141,6 @@ async def analyze_ticker(ticker: str, price_summary: str) -> str:
 
 async def analyze_premarket(data_summary: str) -> str:
     """Returns a plain-text Chinese pre-market macro briefing string."""
-    if not config.DEEPSEEK_API_KEY:
-        return _NOT_CONFIGURED_MSG
     prompt = (
         "你是一位专业的盘前宏观分析师。请根据以下盘前指标数据，用中文撰写简报，"
         "重点分析不同品种之间的组合关系及其市场含义。\n\n"
@@ -103,7 +154,7 @@ async def analyze_premarket(data_summary: str) -> str:
         "4. 今日关键点：一个最值得关注的价位或触发因素。\n\n"
         "要求：不超过280字，简洁直接，可操作性强。"
     )
-    return await _call_deepseek([{"role": "user", "content": prompt}])
+    return await _call_llm([{"role": "user", "content": prompt}])
 
 
 # ---------------------------------------------------------------------------
@@ -150,15 +201,17 @@ async def classify_flash(content: str) -> dict:
         f"快讯内容: {content}\n\n"
         '请返回JSON: {"level": 1到3的整数, "category": "分类标签"}'
     )
-    raw = await _call_deepseek(
+    raw = await _call_llm(
         [{"role": "user", "content": prompt}],
         response_format={"type": "json_object"},
     )
     data = json.loads(raw)
-    level = int(data.get("level", 1))
-    if level not in (1, 2, 3):
-        level = 1
+    level = data.get("level")
+    if type(level) is not int or level not in (1, 2, 3):
+        raise LLMError("invalid news classification")
     category = data.get("category") or "其他"
+    if category not in _FLASH_CATEGORIES:
+        category = "其他"
     return {"level": level, "category": category}
 
 
@@ -180,12 +233,14 @@ async def is_followup_story(new_content: str, recent_contents: list[str]) -> boo
         f"新快讯：{new_content}\n\n"
         '只返回JSON：{"is_followup": true 或 false}'
     )
-    raw = await _call_deepseek(
+    raw = await _call_llm(
         [{"role": "user", "content": prompt}],
         response_format={"type": "json_object"},
     )
     data = json.loads(raw)
-    return bool(data.get("is_followup", False))
+    if not isinstance(data.get("is_followup"), bool):
+        raise LLMError("invalid follow-up classification")
+    return data["is_followup"]
 
 
 async def summarize_flash_alert(content: str) -> str:
@@ -196,7 +251,7 @@ async def summarize_flash_alert(content: str) -> str:
         f"快讯内容: {content}\n\n"
         "请用简洁的中文bullet point列出，每条不超过30字，不超过5条。"
     )
-    return await _call_deepseek([{"role": "user", "content": prompt}])
+    return await _call_llm([{"role": "user", "content": prompt}])
 
 
 async def summarize_flash_digest(items: list[dict]) -> str:
@@ -207,7 +262,7 @@ async def summarize_flash_digest(items: list[dict]) -> str:
         "不超过6条要点，每条不超过30字，标注涉及的关键资产/行业/地区。不要提供投资建议。\n\n"
         f"快讯列表:\n{listing}"
     )
-    return await _call_deepseek([{"role": "user", "content": prompt}])
+    return await _call_llm([{"role": "user", "content": prompt}])
 
 
 async def analyze_earnings_reaction(
@@ -230,7 +285,7 @@ async def analyze_earnings_reaction(
         "（例如业绩超预期但股价下跌），简要推测可能原因（如指引不及预期、估值已price-in等）。"
         "不要提供投资建议。"
     )
-    return await _call_deepseek([{"role": "user", "content": prompt}])
+    return await _call_llm([{"role": "user", "content": prompt}])
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +331,7 @@ async def analyze_sec_filing(ticker: str, form_type: str, text: str) -> dict:
         '"risks": ["潜在风险"], '
         '"market_implications": "对市场/股价的可能影响（一句话，不超过60字）"}'
     )
-    raw = await _call_deepseek(
+    raw = await _call_llm(
         [{"role": "user", "content": prompt}],
         response_format={"type": "json_object"},
     )
@@ -344,4 +399,4 @@ async def analyze_options_anomaly(
         f"数据：\n{data_block}\n\n"
         "请用简洁的中文bullet point列出。"
     )
-    return await _call_deepseek([{"role": "user", "content": prompt}])
+    return await _call_llm([{"role": "user", "content": prompt}])

@@ -1,7 +1,7 @@
 # Trading Bot
 
 A modular Discord bot for market data, news intelligence, earnings automation, and
-options-flow anomaly detection — with AI analysis powered by DeepSeek.
+options-flow anomaly detection — with AI analysis via OpenRouter (DeepSeek Flash by default).
 
 Beyond on-demand commands, the bot runs several **automated pipelines**: Jin10 flash-news
 classification and delivery, a weekly + after-market earnings workflow (including SEC
@@ -33,7 +33,11 @@ NEWS_CHANNEL_ID=频道ID                # Jin10 快讯摘要(L2)
 OPTIONS_ALERT_CHANNEL_ID=频道ID       # 期权异动(可选，不填则用 ALERT_CHANNEL_ID)
 
 # --- AI / 数据源 Key ---
-DEEPSEEK_API_KEY=你的DeepSeek Key      # 所有 AI 功能：!analyze、盘前简报、快讯/财报/期权分析
+OPENROUTER_API_KEY=你的OpenRouter Key # 所有 AI 功能；不再直连 DeepSeek
+LLM_MODEL=deepseek/deepseek-v4-flash
+LLM_TIMEOUT_SECONDS=45
+LLM_MAX_TOKENS=2048
+LLM_REASONING_ENABLED=false
 JIN10_API_KEY=你的Jin10 MCP Token      # Jin10 快讯管线
 FRED_API_KEY=你的FRED Key              # !macro 宏观仪表盘 (国债/利差/流动性)
 FMP_API_KEY=你的FMP Key                # 财报日历
@@ -53,6 +57,23 @@ MOOMOO_PORT=11111
 python bot.py
 ```
 或使用 Docker（见下方 **部署 / Deployment**）。
+
+LLM 不可用时，盘前简报、`!analyze`、新闻摘要和已有基础数据的异动/财报推送
+仍显示基础信息，并标注「LLM API 调用失败」。未配置 Key 也走降级。
+HTTP 401/402/403 冷却 5 分钟，其他服务错误冷却至少 1 分钟；不自动重试计费请求。
+更换模型只需修改 `LLM_MODEL`，但该模型必须支持 JSON 输出用于新闻分类和 SEC 分析。
+
+### 测试与发布 / CI
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+GitHub Actions 在 push、PR、手动触发和每周一 15:23 UTC 执行离线测试及 Docker 构建。
+测试使用临时 SQLite、模拟 HTTP 和模拟 Discord，不访问生产数据库、不发送消息、不消耗 API。
+Railway 生产服务保持跟踪 `main`，开启 **Wait for CI**；修复分支通过 PR 合并后再部署。
+离线 CI 无法检测真实 API 余额、配额或服务可用性，仍需关注运行日志和数据源告警。
+完整配置与故障说明见 [OpenRouter 与 Railway 发布说明](deploy/openrouter-rollout.md)。
 
 ---
 
@@ -88,6 +109,8 @@ python bot.py
 - **L2（中）** — 汇总为定时摘要（盘前 / 盘中每小时 / 盘后）推送到 `NEWS_CHANNEL_ID`。
 - **L3（高）** — 立即推送带 AI 解读的重大快讯到 `ALERT_CHANNEL_ID`，并做重复事件抑制。
 - 金十自身的「速递/要闻」类汇总帖直接原样转发；轮询连续失败会告警。
+- LLM 分类失败时以「未AI分类」入摘要队列，不猜测 L3 重要性；摘要失败则发送带原文链接的摘录并标注失败。每轮最多处理 100 条待摘要记录，其余保留到下轮。
+- 金十抓取失败和 LLM 失败分开处理；数据源告警发往 `ALERT_CHANNEL_ID`，包含错误类型与最近成功时间，恢复后另发通知。
 
 ### 📅 财报工作流 (scheduler.py + earnings_data.py + sec_filings.py)
 - **本周财报日历** — 周一 9:00 ET：本周 watchlist 财报安排（FMP + Nasdaq 合并数据源）。
@@ -122,7 +145,7 @@ python bot.py
 ## 数据来源 / Data Sources
 
 - **股票 / 加密 / 商品 / 期权链**: [Yahoo Finance](https://finance.yahoo.com/) via `yfinance`
-- **AI 分析**: [DeepSeek](https://www.deepseek.com/) (`deepseek-v4-flash`)
+- **AI 分析**: [OpenRouter](https://openrouter.ai/) (`deepseek/deepseek-v4-flash`)
 - **快讯**: [金十数据 MCP](https://mcp.jin10.com/)
 - **宏观**: [FRED](https://fred.stlouisfed.org/) + yfinance
 - **财报日历**: [Financial Modeling Prep](https://financialmodelingprep.com/) + [Nasdaq](https://www.nasdaq.com/)
@@ -164,7 +187,7 @@ Discord_StockBot/
 │   ├── moomoo_client.py     # moomoo SDK 封装（同步，走 OpenD）
 │   ├── jin10_mcp.py         # 金十 MCP 客户端
 │   ├── news_feed.py         # NewsAPI 封装
-│   └── llm_client.py        # DeepSeek API 封装（所有 AI 功能）
+│   └── llm_client.py        # OpenRouter 统一封装（所有 AI 功能）
 │
 ├── storage/                 # SQLite 持久化 (data/bot.db)
 │   ├── db.py                # 连接助手
@@ -183,12 +206,15 @@ Discord_StockBot/
 
 - **股票 / 加密 / 期权**: [Yahoo Finance](https://finance.yahoo.com/) via `yfinance`
 - **新闻**: [NewsAPI](https://newsapi.org/)
-- **AI 分析**: [DeepSeek](https://www.deepseek.com/)
+- **AI 分析**: [OpenRouter](https://openrouter.ai/)
 - **快讯数据**: [金十数据 MCP](https://mcp.jin10.com/)
 
 ---
 
 ## 监控 / Monitoring (Grafana + Prometheus)
+
+OpenRouter 返回的 `usage.cost` 优先计入 `llm_cost_usd_total`；仅在缺失时使用
+`LLM_PRICE_*_PER_1M` 估算。指标仍在进程内，重启会归零，不是持久化账单。
 
 The stack in `docker-compose.yml` runs the bot plus a self-contained
 monitoring environment on a shared `monitoring` network:

@@ -9,6 +9,7 @@ HTTP endpoint on its own daemon thread alongside the discord.py event loop.
 Scraped by Prometheus at bot:9091 (see prometheus/prometheus.yml).
 """
 import os
+import math
 
 from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
@@ -36,7 +37,7 @@ discord_api_latency_seconds = Gauge(
 )
 
 # ---------------------------------------------------------------------------
-# LLM (DeepSeek)
+# LLM (OpenRouter)
 # ---------------------------------------------------------------------------
 llm_requests_total = Counter(
     "llm_requests_total",
@@ -58,12 +59,11 @@ llm_request_duration_seconds = Histogram(
 
 llm_cost_usd_total = Counter(
     "llm_cost_usd_total",
-    "Estimated LLM spend in USD, by model. Only populated when per-token "
-    "prices are configured (see LLM_PRICE_* env vars).",
+    "LLM spend in USD, by model: provider-reported cost, or a configured estimate.",
     ["model"],
 )
 
-# Optional cost estimation. Stays at 0 unless prices are supplied via env, in
+# Fallback cost estimation when the provider omits usage.cost. Prices are in
 # USD per 1,000,000 tokens, e.g.:
 #   LLM_PRICE_PROMPT_PER_1M=0.07
 #   LLM_PRICE_COMPLETION_PER_1M=0.27
@@ -71,8 +71,16 @@ _PRICE_PROMPT_PER_1M = float(os.getenv("LLM_PRICE_PROMPT_PER_1M", "0") or 0)
 _PRICE_COMPLETION_PER_1M = float(os.getenv("LLM_PRICE_COMPLETION_PER_1M", "0") or 0)
 
 
-def record_llm_cost(model: str, prompt_tokens: int, completion_tokens: int) -> None:
-    """Add estimated USD cost for one call, if prices are configured."""
+def record_llm_cost(model: str, prompt_tokens: int, completion_tokens: int, reported_cost=None) -> None:
+    """Prefer OpenRouter's reported cost, including zero; otherwise estimate."""
+    if reported_cost is not None:
+        try:
+            cost = float(reported_cost)
+            if math.isfinite(cost) and cost >= 0:
+                llm_cost_usd_total.labels(model=model).inc(cost)
+                return
+        except (ValueError, TypeError):
+            pass
     if _PRICE_PROMPT_PER_1M <= 0 and _PRICE_COMPLETION_PER_1M <= 0:
         return
     cost = (

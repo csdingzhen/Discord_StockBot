@@ -20,11 +20,14 @@ OPTIONS_ALERT_CHANNEL_ID: int = int(os.getenv("OPTIONS_ALERT_CHANNEL_ID", 0)) or
 # External APIs
 # ---------------------------------------------------------------------------
 NEWS_API_KEY: str = os.getenv("NEWS_API_KEY", "")
-OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 FRED_API_KEY: str = os.getenv("FRED_API_KEY", "")
 FMP_API_KEY:  str = os.getenv("FMP_API_KEY",  "")
 JIN10_API_KEY: str = os.getenv("JIN10_API_KEY", "")
-DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
+OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
+LLM_MODEL: str = os.getenv("LLM_MODEL", "deepseek/deepseek-v4-flash")
+LLM_TIMEOUT_SECONDS: float = float(os.getenv("LLM_TIMEOUT_SECONDS", "45"))
+LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "2048"))
+LLM_REASONING_ENABLED: bool = os.getenv("LLM_REASONING_ENABLED", "false").lower() in ("1", "true", "yes")
 
 # SEC EDGAR requires a descriptive User-Agent (name + contact email) on every
 # request, or it rejects the call outright. No API key needed.
