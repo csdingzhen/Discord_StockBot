@@ -1,5 +1,6 @@
 import os
 from dotenv import load_dotenv
+from utils.options_settings import load_options_settings
 
 load_dotenv()
 
@@ -38,13 +39,59 @@ SEC_EDGAR_USER_AGENT: str = os.getenv(
 # ---------------------------------------------------------------------------
 # moomoo OpenAPI (options-flow anomaly detection)
 # ---------------------------------------------------------------------------
-# Requires moomoo OpenD running locally (or reachable) and logged into the
-# account. The bot talks to OpenD over TCP; OpenD talks to moomoo's servers.
-# Disabled by default so the rest of the bot runs without OpenD installed --
-# flip MOOMOO_ENABLED=true in .env on the machine where OpenD is set up.
-MOOMOO_ENABLED: bool = os.getenv("MOOMOO_ENABLED", "false").lower() in ("1", "true", "yes")
-MOOMOO_HOST: str = os.getenv("MOOMOO_HOST", "127.0.0.1")
-MOOMOO_PORT: int = int(os.getenv("MOOMOO_PORT", 11111))
+# Nonsecret options settings live in version-controlled settings/options.json.
+# Legacy options environment variables intentionally no longer override the file.
+_options = load_options_settings()
+_moomoo, _scan, _catalyst = (_options[k] for k in ("moomoo", "scan", "catalyst"))
+MOOMOO_ENABLED = _moomoo["enabled"]
+MOOMOO_HOST = _moomoo["host"]
+MOOMOO_PORT = _moomoo["port"]
+MOOMOO_TRANSPORT = _moomoo["transport"]
+MOOMOO_APP_KEY = os.getenv("MOOMOO_APP_KEY", "")
+MOOMOO_PRIVATE_KEY_PEM = os.getenv("MOOMOO_PRIVATE_KEY_PEM", "")
+MOOMOO_REQUEST_INTERVAL = _moomoo["request_interval_seconds"]
+MOOMOO_MAX_PAGES = _moomoo["max_pages"]
+MOOMOO_SCAN_TIMEOUT_SECONDS = _moomoo["scan_timeout_seconds"]
+MOOMOO_SCREEN_FIELD_FILTER = _moomoo["field_filter"]
+OPTIONS_UNIVERSE = _scan["universe"]
+OPTIONS_WATCHLIST = _scan["watchlist"]
+OPTIONS_EXCLUDED_UNDERLYINGS = frozenset(_scan["excluded_underlyings"])
+OPTIONS_SCAN_MINUTES = _scan["interval_minutes"]
+OPTIONS_MIN_PREMIUM = _scan["min_premium"]
+OPTIONS_MIN_CONTRACT_VOLUME = _scan["min_contract_volume"]
+OPTIONS_MAX_DTE = _scan["max_dte"]
+OPTIONS_MAX_SPREAD_RATIO = _scan["max_spread_ratio"]
+OPTIONS_MAX_QUOTE_AGE_SECONDS = _scan["max_quote_age_seconds"]
+OPTIONS_L2_SCORE = _scan["l2_score"]
+OPTIONS_L3_SCORE = _scan["l3_score"]
+OPTIONS_MIN_HISTORY_DAYS = _scan["min_history_days"]
+OPTIONS_MIN_RELATIVE_VOLUME = _scan["min_relative_volume"]
+OPTIONS_MIN_IV_JUMP = _scan["min_iv_jump"]
+OPTIONS_SHORT_DTE = _scan["short_dte"]
+OPTIONS_SCORE_WEIGHTS = _scan["score_weights"]
+OPTIONS_EXECUTION_WINDOW_SECONDS = _scan["execution_window_seconds"]
+OPTIONS_REPEAT_COUNT = _scan["repeat_count"]
+OPTIONS_RETAIN_SNAPSHOTS_DAYS = _scan["retain_snapshots_days"]
+OPTIONS_EVENT_COOLDOWN_MINUTES = _scan["event_cooldown_minutes"]
+OPTIONS_MAX_ALERTS_PER_SCAN = _scan["max_alerts_per_scan"]
+
+CATALYST_ENABLED = _catalyst["enabled"]
+CATALYST_RESEARCH_MODEL = _catalyst["research_model"]
+CATALYST_SEARCH_PROVIDER = _catalyst["search_provider"]
+CATALYST_JUDGE_MODE = _catalyst["judge_mode"]
+CATALYST_JEV_MODEL = _catalyst["jev_model"]
+CATALYST_CONTEXT = _catalyst["company_context"]
+CATALYST_CACHE_MINUTES = _catalyst["cache_minutes"]
+CATALYST_LOOKBACK_DAYS = _catalyst["lookback_days"]
+CATALYST_MAX_SEARCHES = _catalyst["max_searches"]
+CATALYST_MAX_RESULTS = _catalyst["max_results"]
+CATALYST_DAILY_REQUEST_LIMIT = _catalyst["daily_request_limit"]
+CATALYST_DAILY_BUDGET_USD = _catalyst["daily_budget_usd"]
+CATALYST_CALL_RESERVE_USD = _catalyst["call_reserve_usd"]
+CATALYST_MAX_INPUT_BYTES = _catalyst["max_input_bytes"]
+CATALYST_MAX_OUTPUT_TOKENS = _catalyst["max_output_tokens"]
+CATALYST_TIMEOUT_SECONDS = _catalyst["timeout_seconds"]
+CATALYST_MAX_CONCURRENCY = _catalyst["max_concurrency"]
 
 # ---------------------------------------------------------------------------
 # Misc

@@ -95,3 +95,8 @@ def start_metrics_server(port: int = METRICS_PORT) -> None:
     """Start the Prometheus metrics HTTP endpoint on a background daemon thread."""
     start_http_server(port)
     print(f"[metrics] Prometheus metrics server listening on :{port}")
+
+
+options_pipeline_total = Counter("options_pipeline_total", "Options pipeline events", ["stage", "status"])
+options_scan_duration_seconds = Histogram("options_scan_duration_seconds", "Options scan latency")
+catalyst_pipeline_total = Counter("catalyst_pipeline_total", "Catalyst cache, search and judge outcomes", ["stage", "status"])

@@ -68,8 +68,9 @@ def _to_float(value):
     if value is None:
         return None
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -197,10 +198,11 @@ def _normalize_option_row(row: dict, ticker: str) -> dict | None:
         "dte": _to_int(row.get("option_expiry_date_distance")),
         "last_price": _to_float(row.get("last_price")),
         "volume": _to_int(row.get("volume")) or 0,
+        "turnover": _to_float(row.get("turnover")),
         "open_interest": _to_int(row.get("option_open_interest")),
         "iv": _to_float(row.get("option_implied_volatility")),
         "delta": _to_float(row.get("option_delta")),
-        "multiplier": _to_int(row.get("option_contract_multiplier")) or 100,
+        "multiplier": _to_float(row.get("option_contract_multiplier")),
     }
 
 

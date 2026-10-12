@@ -16,6 +16,7 @@ free/ungated for any ticker (Nasdaq- or NYSE-listed) but does not carry
 revenue figures, only EPS actual/estimate/surprise.
 """
 import re
+import logging
 import requests
 from datetime import date, datetime, timedelta
 
@@ -23,6 +24,14 @@ from config import FMP_API_KEY
 from utils.market_time import market_today
 
 _BASE = "https://financialmodelingprep.com/stable"
+
+
+def _cache_calendar(entries):
+    try:
+        from storage.catalyst_store import cache_earnings
+        cache_earnings(entries)
+    except Exception:
+        logging.getLogger(__name__).warning("Earnings evidence cache unavailable", exc_info=True)
 
 _NASDAQ_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -128,6 +137,7 @@ def fetch_weekly_calendar(watchlist: set = None) -> list[dict]:
     if watchlist:
         data = [d for d in data if d.get("symbol") in watchlist]
     data.sort(key=lambda x: x.get("date", ""))
+    _cache_calendar(data)
     return data
 
 
@@ -149,6 +159,7 @@ def fetch_todays_results(watchlist: set = None) -> list[dict]:
     data = _merge_calendar_sources(fmp_data, nasdaq_data)
     if watchlist:
         data = [d for d in data if d.get("symbol") in watchlist]
+    _cache_calendar(data)
     return [d for d in data if d.get("epsActual") is not None]
 
 
@@ -262,6 +273,7 @@ def fetch_ticker_earnings(ticker: str) -> tuple[dict | None, dict | None, str | 
     ticker = ticker.upper()
     upcoming = _fetch_upcoming_from_fmp(ticker) or _fetch_upcoming_from_nasdaq(ticker)
     most_recent = _fetch_recent_from_nasdaq(ticker)
+    _cache_calendar([{**entry, "symbol": ticker} for entry in (upcoming, most_recent) if entry])
 
     if upcoming is None and most_recent is None:
         return None, None, "暂无财报数据"

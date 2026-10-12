@@ -229,5 +229,6 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             for extension in COGS:
                 await bot.load_extension(extension)
             self.assertEqual(set(bot.extensions), set(COGS))
-            for name in ("premarket", "earnings", "newsdigest", "analyze", "weeklyearnings"):
+            for name in ("premarket", "earnings", "newsdigest", "analyze", "weeklyearnings",
+                         "options", "optionhealth", "optionscan", "optionflow", "optionresearch"):
                 self.assertIsNotNone(bot.get_command(name))
