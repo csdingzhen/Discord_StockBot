@@ -1,7 +1,7 @@
 {
   "version": 1,
   "moomoo": {
-    "enabled": false,
+    "enabled": true,
     "transport": "rest",
     "host": "127.0.0.1",
     "port": 11111,
@@ -54,9 +54,9 @@
     "max_alerts_per_scan": 4
   },
   "catalyst": {
-    "enabled": false,
+    "enabled": true,
     "research_model": "deepseek/deepseek-v4-flash",
-    "search_provider": "none",
+    "search_provider": "openrouter",
     "judge_mode": "jev",
     "jev_model": "typesafe/jev-1.13",
     "company_context": {},
