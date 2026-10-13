@@ -16,8 +16,8 @@ alerts.
 ```bash
 pip install -r requirements.txt
 ```
-> `moomoo-api` is only needed for the options-flow feature. The rest of the bot runs
-> without it (the module stays dormant unless `MOOMOO_ENABLED=true`).
+> `moomoo-api` is only needed for the legacy OpenD backend. The new REST options
+> backend uses signed HTTPS requests and does not require OpenD.
 
 ### 2. 配置环境变量
 在根目录创建 `.env` 文件：
@@ -46,10 +46,10 @@ NEWS_API_KEY=你的NewsAPI Key           # 可选
 # --- SEC EDGAR (可选，有默认值；请改成你自己的联系邮箱) ---
 SEC_EDGAR_USER_AGENT=YourApp/1.0 (you@example.com)
 
-# --- moomoo 期权异动 (可选，需本地 OpenD) ---
-MOOMOO_ENABLED=false                  # 设为 true 开启期权异动扫描
-MOOMOO_HOST=127.0.0.1                 # Docker 内改为 host.docker.internal
-MOOMOO_PORT=11111
+# --- moomoo 期权异动 (可选；Railway 使用 REST) ---
+MOOMOO_APP_KEY=                       # 开通 REST / 期权行情权限后配置
+MOOMOO_PRIVATE_KEY_PEM=               # 仅放在本地环境或 Railway Secret
+# 期权扫描 / Catalyst 开关、筛选、预算、模型：settings/options.json
 ```
 
 ### 3. 启动机器人
@@ -118,11 +118,18 @@ Railway 生产服务保持跟踪 `main`，开启 **Wait for CI**；修复分支�
 - **SEC 文件监控** — 每 20 分钟轮询 EDGAR，检测 watchlist 的 8-K (Item 2.02) / 10-Q / 10-K / 6-K；对财报新闻稿 (EX-99.1) 做结构化 AI 解读（关键财务、看涨/看跌、管理层表态、风险），并合并进当日盘后财报推送。
 
 ### 🚨 期权异动检测 (options_flow.py + moomoo)
-需本地 moomoo OpenD 且 `MOOMOO_ENABLED=true`。交易时段每 20 分钟扫描 `OPTIONS_WATCHLIST`：
-- 每日构建近月合约universe，盘中批量拉取 `get_market_snapshot`（成交量/持仓量/IV/Delta）。
-- **判定逻辑**：必要门槛「当日成交量 > 持仓量」，叠加佐证信号（量仓比、名义成交额、IV 跳升、近月平值、成交量 z-score）。
-- **L3** = 门槛 + ≥1 佐证（或极端名义额/z-score）→ 立即带 AI 解读推送；**L2** → 汇总摘要；单只标的 L3 数量设上限防刷屏。
-- ⚠️ 基于**聚合快照**（非逐笔成交）；「名义成交额」为 量×价×乘数 的估算，非真实大单数据。
+在 [settings/options.json](settings/options.json) 中开启 `moomoo.enabled` 后，默认每 5 分钟做一次无股票白名单的美股期权条件筛选，按 NYSE 实际交易时段运行，支持 DST、节假日和提前收盘。
+- 默认 `moomoo.transport=rest`、`scan.universe=market`。只请求 US_STOCK，结果再排除 SPY/QQQ/SPX/IWM/DIA 等宽基指数、ETF 和相关杠杆/反向产品；排除名单在 JSON 中维护，不是对所有 ETF 的自动分类。
+- 默认最多 10 页、每页 1,000 条、筛选限时 120 秒。达到上限会报告 partial，不能承诺每轮覆盖全部结果；无法可靠识别的调整合约跳过并计数。OpenD 仅支持显式 watchlist 模式。
+- 两阶段处理：成交量 / 金额 / DTE / 流动性过滤，再计算可配置的 0–100 分数。同美东时刻历史基线不足时不加 RVOL 分。
+- 同 ticker 合并事件，L3 默认 >=65 分立即推送；L2 默认 >=35 分进入原定时摘要。滚动冷却、失败重试和待发状态存储在 SQLite。
+- 可选 Catalyst：本地新闻 / 财报 / SEC -> 有上限的搜索适配 -> DeepSeek 研究 -> Jev Decisions 或 DeepSeek 独立评估。先发量化 embed，再补 AI；AI 失败不阻断推送。
+- 每轮最多 4 个即时告警；先全部发送基础信息，再以最多 2 路并发补充 AI。`!optionresearch TICKER` 可用真实 L2+ 候选手动测试流程，不必等待历史数据积累到自动 L3。
+- 配置随代码提交部署生效，旧 `OPTIONS_*` / `CATALYST_*` 策略环境变量不再覆盖 JSON。API 密钥和 Discord channel ID 仍放 Railway variables。
+- **REST screen 是累计成交数据，不是逐笔成交。** 当日成交额不等于单笔大单；没有证据时买卖方向、重复主动买入、单腿属性均为 unknown。
+- `!options` 的 yfinance 期权链保持不变。新增测试自动纳入现有 GitHub Actions。
+
+完整能力核对、字段限制、评分公式和 Railway 启用步骤见 [Options Intelligence V1](deploy/options-intelligence.md)。目前只完成离线验证，未做账户权限 / 实盘行情验证。
 
 ---
 
@@ -136,9 +143,10 @@ Railway 生产服务保持跟踪 `main`，开启 **Wait for CI**；修复分支�
 | `!weeklyearnings` / `!todayearnings` | 立即发送本周财报日历 / 今日财报结果 |
 | `!secpoll` | 立即轮询 SEC 新文件并分析 |
 | `!newsdigest` / `!recentflash [1\|2\|3]` | 立即发送 L2 摘要 / 查看最近分级快讯 |
-| `!optionhealth` | 检查 moomoo OpenD 连接 |
-| `!optionscan` | 立即执行一次全 watchlist 期权扫描 |
-| `!optionflow <TICKER>` | 按需扫描单只标的期权异动 |
+| `!optionhealth` | 检查当前 REST / OpenD 后端 |
+| `!optionscan` | 交易时段立即执行全市场条件筛选（有分页/时间上限） |
+| `!optionflow <TICKER>` | 单标的预览，不写库、不发频道通知；闭市时标注旧快照风险 |
+| `!optionresearch <TICKER>` | 交易时段的真实 L2+ 候选 + DeepSeek/Jev 预览；需开启 Catalyst，共享每日费用预算 |
 
 ---
 
@@ -150,7 +158,7 @@ Railway 生产服务保持跟踪 `main`，开启 **Wait for CI**；修复分支�
 - **宏观**: [FRED](https://fred.stlouisfed.org/) + yfinance
 - **财报日历**: [Financial Modeling Prep](https://financialmodelingprep.com/) + [Nasdaq](https://www.nasdaq.com/)
 - **公司文件**: [SEC EDGAR](https://www.sec.gov/edgar)
-- **期权行情**: [moomoo OpenAPI](https://openapi.moomoo.com/) (本地 OpenD)
+- **期权行情**: [moomoo REST API](https://open.moomoo.com/api/quote/screening/option-screen) / legacy OpenD
 - **恐慌贪婪指数**: CNN
 
 ---

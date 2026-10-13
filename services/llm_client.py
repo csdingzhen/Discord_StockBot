@@ -19,6 +19,7 @@ from services.metrics import (
 )
 
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
 FAILURE_NOTICE = "LLM API 调用失败，仅展示基础数据，未提供 AI 分析。"
 _cooldown_until = 0.0
 _cooldown_identity = None
@@ -34,22 +35,35 @@ class LLMError(RuntimeError):
         super().__init__(f"OpenRouter: {reason}" + (f" (HTTP {status})" if status else ""))
 
 
-async def _call_llm(messages: list[dict], response_format: dict | None = None) -> str:
-    global _cooldown_until, _cooldown_identity, _cooldown_reason
-    if not config.OPENROUTER_API_KEY:
-        raise LLMError("OPENROUTER_API_KEY is not configured")
-    model = config.LLM_MODEL
-    identity = (config.OPENROUTER_API_KEY, model)
-    if identity == _cooldown_identity and time.monotonic() < _cooldown_until:
-        raise LLMError(f"temporarily disabled after {_cooldown_reason}")
+async def _call_llm(messages: list[dict], response_format: dict | None = None, *,
+                    model=None, max_tokens=None, plugins=None, metadata=None) -> str:
     payload = {
-        "model": model, "messages": messages, "stream": False,
-        "max_tokens": config.LLM_MAX_TOKENS,
+        "model": model or config.LLM_MODEL, "messages": messages, "stream": False,
+        "max_tokens": max_tokens or config.LLM_MAX_TOKENS,
         "reasoning": {"enabled": config.LLM_REASONING_ENABLED},
     }
     if response_format:
         payload["response_format"] = response_format
         payload["provider"] = {"require_parameters": True}
+    if plugins:
+        payload["plugins"] = plugins
+    body = await _request_model(payload, _OPENROUTER_URL, metadata)
+    return body["choices"][0]["message"]["content"].strip()
+
+
+async def call_decisions(state, questions, *, metadata=None):
+    return await _request_model({"model": config.CATALYST_JEV_MODEL, "state": state,
+                                 "questions": questions}, _DECISIONS_URL, metadata)
+
+
+async def _request_model(payload, url, metadata=None):
+    global _cooldown_until, _cooldown_identity, _cooldown_reason
+    if not config.OPENROUTER_API_KEY:
+        raise LLMError("OPENROUTER_API_KEY is not configured")
+    model = payload["model"]
+    identity = (config.OPENROUTER_API_KEY, model)
+    if identity == _cooldown_identity and time.monotonic() < _cooldown_until:
+        raise LLMError(f"temporarily disabled after {_cooldown_reason}")
     headers = {
         "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
@@ -61,7 +75,7 @@ async def _call_llm(messages: list[dict], response_format: dict | None = None) -
     try:
         timeout = aiohttp.ClientTimeout(total=config.LLM_TIMEOUT_SECONDS)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(_OPENROUTER_URL, headers=headers, json=payload) as resp:
+            async with session.post(url, headers=headers, json=payload) as resp:
                 if resp.status != 200:
                     reason = {
                         401: "invalid API key", 402: "insufficient credits or spending limit",
@@ -80,6 +94,8 @@ async def _call_llm(messages: list[dict], response_format: dict | None = None) -
                 if not isinstance(body, dict) or body.get("error"):
                     raise LLMError("provider returned an error response")
                 usage = body.get("usage") or {}
+                if metadata is not None:
+                    metadata.update({"usage": usage, "model": model})
                 # Account for billed tokens even if the model's output is unusable.
                 if isinstance(usage, dict):
                     prompt_tokens = _token_count(usage.get("prompt_tokens"))
@@ -87,6 +103,11 @@ async def _call_llm(messages: list[dict], response_format: dict | None = None) -
                     llm_tokens_total.labels(model=model, direction="prompt").inc(prompt_tokens)
                     llm_tokens_total.labels(model=model, direction="completion").inc(completion_tokens)
                     record_llm_cost(model, prompt_tokens, completion_tokens, usage.get("cost"))
+                if url == _DECISIONS_URL:
+                    if not isinstance(body.get("answers"), dict):
+                        raise LLMError("invalid Decisions response")
+                    status = "success"
+                    return body
                 try:
                     choice = body["choices"][0]
                     content = choice["message"]["content"]
@@ -94,12 +115,14 @@ async def _call_llm(messages: list[dict], response_format: dict | None = None) -
                         raise ValueError("incomplete response")
                     if not isinstance(content, str) or not content.strip():
                         raise ValueError("empty response")
-                    if response_format and not isinstance(json.loads(content), dict):
+                    if payload.get("response_format") and not isinstance(json.loads(content), dict):
                         raise ValueError("expected JSON object")
                 except (KeyError, IndexError, TypeError, ValueError) as exc:
                     raise LLMError("invalid or incomplete model output") from exc
                 status = "success"
-                return content.strip()
+                if metadata is not None:
+                    metadata["annotations"] = choice["message"].get("annotations") or []
+                return body
     except (LLMError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
         error = exc if isinstance(exc, LLMError) else LLMError(type(exc).__name__)
         # Do not retry billable requests or hammer an exhausted account per news item.

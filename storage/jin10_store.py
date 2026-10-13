@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS jin10_flash (
 );
 CREATE INDEX IF NOT EXISTS idx_jin10_flash_pending_l2
     ON jin10_flash(level, digested);
+CREATE INDEX IF NOT EXISTS idx_jin10_fetched ON jin10_flash(fetched_at);
 """
 
 

@@ -23,7 +23,8 @@ jobs:
       DISCORD_TOKEN: ''
       OPENROUTER_API_KEY: ''
       JIN10_API_KEY: ''
-      MOOMOO_ENABLED: 'false'
+      MOOMOO_APP_KEY: ''
+      MOOMOO_PRIVATE_KEY_PEM: ''
       TZ: UTC
     steps:
       - uses: actions/checkout@v6

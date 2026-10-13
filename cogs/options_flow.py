@@ -1,71 +1,98 @@
-"""
-options_flow.py — unusual options-activity pipeline (moomoo).
-
-Mirrors the news pipeline's tiering:
-  L1 (below interest) -> snapshot stored only, never posted.
-  L2 (1 strong signal) -> recorded, rolled into a scheduled digest.
-  L3 (>=2 strong signals or extreme notional) -> immediate AI-analysis alert.
-
-Gated behind config.MOOMOO_ENABLED: when off (no OpenD on this machine), the
-loops no-op so the rest of the bot runs untouched. The heavy synchronous
-moomoo SDK calls run via asyncio.to_thread; scoring is pure (services.options_scan).
-"""
+"""Existing options commands and channel, now backed by ticker-level events."""
 import asyncio
-import json
-from datetime import time
+import logging
+import re
+import time as clock
+from collections import defaultdict
+from datetime import datetime, time, timezone
 
 import discord
 from discord.ext import commands, tasks
 
 import config
-from cogs.scheduler import market_open_today
-from services import llm_client, moomoo_client, options_scan
-from storage import options_store
-from utils.constants import OPTIONS_WATCHLIST
+from cogs.scheduler import _nyse_schedule_today, market_open_today
+from services import catalyst_intelligence, moomoo_client, options_scan
+from services.metrics import options_pipeline_total, options_scan_duration_seconds
+from services.moomoo_rest import MoomooRestClient
+from storage import catalyst_store, options_store
 from utils.market_time import ET, market_now, market_today
 
-# Regular US options session (plus a few minutes past the close for late
-# prints). Scanning outside this window just re-reads stale cumulative volume.
-_MARKET_OPEN  = time(9, 30)
-_MARKET_CLOSE = time(16, 15)
+_log = logging.getLogger(__name__)
+_DIGEST_TIMES = [time(11, 30, tzinfo=ET), time(13, 30, tzinfo=ET),
+                 time(15, 30, tzinfo=ET), time(16, 15, tzinfo=ET)]
 
 
-def _within_market_hours() -> bool:
-    now = market_now().time()
-    return _MARKET_OPEN <= now <= _MARKET_CLOSE
-
-# Intraday roll-ups of L2 flow, plus an end-of-session wrap.
-_DIGEST_TIMES = [
-    time(11, 30, tzinfo=ET),
-    time(13, 30, tzinfo=ET),
-    time(15, 30, tzinfo=ET),
-    time(16, 15, tzinfo=ET),
-]
-
-# After this many consecutive scan failures (~1h at 20-min cadence), warn once.
-_FAILURE_ALERT_THRESHOLD = 3
-
-# Per-scan cap on immediate alerts so a market-wide IV spike can't flood the
-# channel; the rest still land in the digest.
-_MAX_L3_PER_SCAN = 8
+def _within_market_hours():
+    row = _nyse_schedule_today()
+    return row is not None and row["market_open"] <= market_now() <= row["market_close"]
 
 
 def _alert_channel(bot):
-    cid = config.OPTIONS_ALERT_CHANNEL_ID
-    return bot.get_channel(cid) if cid else None
+    return bot.get_channel(config.OPTIONS_ALERT_CHANNEL_ID) if config.OPTIONS_ALERT_CHANNEL_ID else None
+
+
+def event_embed(event):
+    embed = discord.Embed(title=f"Unusual Options | {event['ticker']}", color=discord.Color.orange(),
+                          timestamp=datetime.fromisoformat(event["as_of"]))
+    embed.description = (f"**Unusual Score: {event['score']}/100**\n"
+        f"Direction: {event['directional_bias']} | evidence strength: {event['direction_confidence']}/100\n"
+        f"Multi-leg risk: {event['multi_leg_risk']}\n"
+        f"Selected contracts' daily activity: **${event['premium']:,.0f}**")
+    for contract in event["contracts"][:3]:
+        ratio = contract.get("vol_oi_ratio")
+        oi = contract.get("open_interest")
+        oi_text = f"{oi:,.0f}" if oi is not None else "unknown"
+        reasons = ", ".join(options_scan.reason_labels(contract["reasons"]))
+        value = (f"Volume {contract['volume']:,.0f} / OI {oi_text}"
+                 + (f" ({ratio:.1f}x)" if ratio is not None else "")
+                 + f"\nDaily premium: ${contract['notional']:,.0f} ({contract['premium_basis']})"
+                 + f"\nDTE {contract['dte']:g} | History {contract['history_days']} days\n{reasons}")
+        if contract.get("iv") is not None:
+            value += f"\nIV {contract['iv']:.1f}%"
+        if contract.get("interval_volume") is not None:
+            value += f" | Interval volume +{contract['interval_volume']:,.0f}"
+        value += f"\nAggressive buying: {contract['aggressive_buying']}"
+        value += " | Repeated buying: " + ("inferred" if contract["repeated_buying"] else "not established")
+        embed.add_field(name=options_scan.contract_label(contract)[:100], value=value[:850], inline=False)
+    if not event.get("coverage_complete", True):
+        embed.add_field(name="Coverage", value="Partial candidate set; not a full-market total.", inline=False)
+    embed.set_footer(text="Aggregate snapshots, not execution tape. Daily premium is not a block trade. "
+                     "OI opening activity and exchange quote age may be unknown. Scores are not probabilities.")
+    return embed
+
+
+def add_catalyst(embed, result):
+    score = result.get("evidence_score")
+    text = (f"Classification: {result.get('classification', 'unavailable')}\n"
+            f"Catalyst Evidence Score: {str(score) + '/100' if score is not None else 'N/A'}\n"
+            + result.get("research", {}).get("summary", "Research unavailable."))
+    embed.add_field(name="Potential Catalyst", value=text[:1024], inline=False)
+    links = []
+    for source in result.get("sources", [])[:3]:
+        url = catalyst_store.safe_url(source.get("url"))
+        if url:
+            stamp = source.get("published_at") or "publication time unverified"
+            line = f"[{source.get('source', 'Source')}]({url}) | {stamp}"
+            if len("\n".join([*links, line])) <= 1024:
+                links.append(line)
+    if links:
+        embed.add_field(name="Evidence Sources", value="\n".join(links), inline=False)
+    return embed
 
 
 class OptionsFlow(commands.Cog):
-    """Polling, scoring, and delivery of unusual options activity."""
-
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot):
         self.bot = bot
         options_store.init_db()
+        catalyst_store.init_db()
+        self._rest = MoomooRestClient()
+        self._scan_lock = asyncio.Lock()
+        self._research_slots = asyncio.Semaphore(config.CATALYST_MAX_CONCURRENCY)
         self._consecutive_failures = 0
         self._failure_alerted = False
-        # In-memory contract universe per ticker, rebuilt once per day.
-        self._universe: dict[str, list[str]] = {}
-        self._universe_date: str | None = None
+        self._universe = {}
+        self._universe_date = None
+        self._pruned_date = None
         self.scan_loop.start()
         self.flush_digest.start()
 
@@ -73,277 +100,277 @@ class OptionsFlow(commands.Cog):
         self.scan_loop.cancel()
         self.flush_digest.cancel()
 
-    # ------------------------------------------------------------------
-    # Universe (contract codes) — built once per day per ticker
-    # ------------------------------------------------------------------
-
-    async def _get_universe(self, ticker: str) -> list[str]:
+    async def _get_universe(self, ticker):
         today = market_today().isoformat()
         if self._universe_date != today:
-            self._universe = {}
-            self._universe_date = today
+            self._universe, self._universe_date = {}, today
         if ticker not in self._universe:
-            try:
-                self._universe[ticker] = await asyncio.to_thread(
-                    moomoo_client.build_universe, ticker
-                )
-            except Exception as e:
-                print(f"[options] build_universe failed for {ticker}: {e}")
-                self._universe[ticker] = []
+            codes = await asyncio.to_thread(moomoo_client.build_universe, ticker)
+            if codes:
+                self._universe[ticker] = codes
+            return codes
         return self._universe[ticker]
 
-    # ------------------------------------------------------------------
-    # Scan loop
-    # ------------------------------------------------------------------
-
-    @tasks.loop(minutes=20)
-    async def scan_loop(self):
-        if not config.MOOMOO_ENABLED or not market_open_today() or not _within_market_hours():
-            return
-        await self._run_scan()
-
-    async def _run_scan(self):
-        today = market_today().isoformat()
-        l3_posted = 0
-        successes = 0
-
-        for ticker in sorted(OPTIONS_WATCHLIST):
+    async def _collect(self, tickers):
+        if config.MOOMOO_TRANSPORT == "rest":
+            return await self._rest.scan(tickers)
+        if config.MOOMOO_TRANSPORT != "opend":
+            raise ValueError("MOOMOO_TRANSPORT must be rest or opend")
+        if tickers is None:
+            raise ValueError("Market-wide screening requires the REST backend")
+        snapshots, successes = [], 0
+        for ticker in tickers:
             try:
                 codes = await self._get_universe(ticker)
                 if not codes:
                     continue
-                underlying_price, snaps = await asyncio.to_thread(
-                    moomoo_client.fetch_ticker_snapshots, ticker, codes
-                )
+                spot, rows = await asyncio.to_thread(moomoo_client.fetch_ticker_snapshots, ticker, codes)
                 successes += 1
-                if not snaps:
-                    continue
-                await asyncio.to_thread(
-                    options_store.save_snapshots, snaps, today, underlying_price
-                )
-                prior_iv = await asyncio.to_thread(
-                    options_store.get_prior_iv_map, ticker, today
-                )
-                vol_baseline = await asyncio.to_thread(
-                    options_store.get_volume_baseline, ticker, today
-                )
-                anomalies = options_scan.detect_anomalies(snaps, prior_iv, vol_baseline)
+                observed = datetime.now(timezone.utc).isoformat()
+                snapshots.extend({**s, "source": "opend", "observed_at": observed,
+                                  "underlying_price": spot, "quote_time": None} for s in rows)
+            except Exception:
+                _log.exception("OpenD scan failed for %s", ticker)
+            await asyncio.sleep(config.MOOMOO_REQUEST_INTERVAL)
+        if not successes:
+            raise RuntimeError("No successful OpenD option snapshots")
+        return snapshots, {"complete": successes == len(tickers), "profiles": {}}
 
-                for a in anomalies:
-                    signals_json = json.dumps(
-                        {"reasons": a["reasons"], "notional": a["notional"],
-                         "vol_oi_ratio": a["vol_oi_ratio"], "vol_zscore": a["vol_zscore"],
-                         "iv": a["iv"], "strike": a["strike"], "expiry": a["expiry"],
-                         "option_type": a["option_type"]},
-                        ensure_ascii=False,
-                    )
-                    newly = await asyncio.to_thread(
-                        options_store.record_alert, a, today, signals_json
-                    )
-                    if a["tier"] == 3 and newly and l3_posted < _MAX_L3_PER_SCAN:
-                        await self._post_anomaly_alert(a, underlying_price)
-                        l3_posted += 1
-            except Exception as e:
-                print(f"[options] scan failed for {ticker}: {e}")
-            await asyncio.sleep(1)  # courtesy spacing under moomoo rate limits
+    async def _scan(self, tickers=None, persist=True):
+        snapshots, coverage = await self._collect(tickers)
+        as_of = datetime.now(timezone.utc)
+        if persist and self._pruned_date != as_of.date():
+            await asyncio.to_thread(options_store.prune_snapshots, as_of)
+            self._pruned_date = as_of.date()
+        anomalies, grouped = [], defaultdict(list)
+        for snap in snapshots:
+            if not options_scan.excluded_underlying(snap["ticker"]):
+                grouped[snap["ticker"]].append(snap)
+        for ticker, rows in grouped.items():
+            prior_iv, baselines, previous = await asyncio.to_thread(
+                options_store.get_scoring_context, ticker, as_of, rows[0]["source"])
+            anomalies.extend(options_scan.detect_anomalies(rows, prior_iv, baselines,
+                                                           as_of=as_of, previous=previous))
+            if persist:
+                await asyncio.to_thread(options_store.save_snapshots, rows,
+                    as_of.astimezone(ET).date().isoformat(), rows[0].get("underlying_price"))
+        events = options_scan.aggregate_events(anomalies, as_of)
+        options_pipeline_total.labels(stage="contracts", status="scanned").inc(len(snapshots))
+        options_pipeline_total.labels(stage="events", status="detected").inc(len(events))
+        if not coverage["complete"]:
+            _log.warning("Options scan coverage is partial (page cap or missing backend data)")
+        _log.info("Options scan scope=%s pages=%s received=%s excluded=%s unresolved=%s "
+                  "tickers=%s events=%s complete=%s stop=%s collection_seconds=%s",
+                  coverage.get("scope", "watchlist"), coverage.get("pages"), len(snapshots)
+                  if "rows_received" not in coverage else coverage["rows_received"],
+                  coverage.get("excluded", 0), coverage.get("unresolved", 0), len(grouped), len(events),
+                  coverage["complete"], coverage.get("stop_reason"), coverage.get("elapsed_seconds"))
+        for event in events:
+            event["coverage_complete"] = coverage["complete"]
+            if persist:
+                await asyncio.to_thread(options_store.save_event, event)
+        return events, coverage, len(snapshots)
 
-        # Only a total wipeout (every ticker failed -> almost always OpenD
-        # down) counts as an outage; isolated per-ticker errors are normal.
-        if successes == 0:
-            await self._record_scan_failure()
-        else:
-            self._record_scan_success()
+    @tasks.loop(minutes=config.OPTIONS_SCAN_MINUTES)
+    async def scan_loop(self):
+        try:
+            if config.MOOMOO_ENABLED and _within_market_hours():
+                await self._run_scan()
+        except Exception:
+            _log.exception("Options scan failed; next run remains enabled")
 
     @scan_loop.before_loop
     async def before_scan_loop(self):
         await self.bot.wait_until_ready()
 
-    # ------------------------------------------------------------------
-    # Failure / outage tracking
-    # ------------------------------------------------------------------
+    async def _run_scan(self):
+        async with self._scan_lock:
+            start = clock.monotonic()
+            coverage = {"profiles": {}}
+            try:
+                tickers = None if config.OPTIONS_UNIVERSE == "market" else config.OPTIONS_WATCHLIST
+                _, coverage, _ = await self._scan(tickers)
+                self._consecutive_failures, self._failure_alerted = 0, False
+                options_pipeline_total.labels(stage="scan", status="success").inc()
+            except Exception:
+                options_pipeline_total.labels(stage="scan", status="error").inc()
+                _log.exception("Options collection/scoring failed")
+                try:
+                    await self._record_scan_failure()
+                except Exception:
+                    _log.exception("Options failure notification could not be delivered")
+            finally:
+                options_scan_duration_seconds.observe(clock.monotonic() - start)
+            # Delivery retries do not depend on the next market-data fetch succeeding.
+            pending = await asyncio.to_thread(options_store.pending_events, datetime.now(timezone.utc), 3)
+            sent = []
+            for event in pending[:config.OPTIONS_MAX_ALERTS_PER_SCAN]:
+                try:
+                    delivery = await self._post_event(event, enrich=False)
+                    if delivery:
+                        sent.append((event, *delivery))
+                except Exception:
+                    _log.exception("Options Discord delivery failed; event remains pending")
+            if sent and config.CATALYST_ENABLED:
+                profiles = coverage["profiles"]
+                if config.MOOMOO_TRANSPORT == "rest":
+                    try:
+                        profiles = await asyncio.wait_for(self._rest.profiles([e["ticker"] for e, _, _ in sent]), 10)
+                    except Exception:
+                        _log.warning("Optional company names unavailable; researching with ticker/local aliases")
+                results = await asyncio.gather(*(self._enrich_event(e, message, embed, profiles.get(e["ticker"]))
+                                                 for e, message, embed in sent), return_exceptions=True)
+                for result in results:
+                    if isinstance(result, BaseException):
+                        _log.error("Catalyst enrichment failed after base delivery (%s)", type(result).__name__)
 
     async def _record_scan_failure(self):
         self._consecutive_failures += 1
-        if self._consecutive_failures >= _FAILURE_ALERT_THRESHOLD and not self._failure_alerted:
+        channel = _alert_channel(self.bot)
+        if self._consecutive_failures >= 3 and not self._failure_alerted and channel:
+            await channel.send(embed=discord.Embed(title="Options scanner unavailable",
+                description=f"Three consecutive failures. Backend: {config.MOOMOO_TRANSPORT}. "
+                            "Check credentials, market-data entitlements and logs.", color=discord.Color.orange()))
             self._failure_alerted = True
-            channel = _alert_channel(self.bot)
-            if channel:
-                await channel.send(embed=discord.Embed(
-                    title="⚠️ 期权异动扫描连续失败",
-                    description=(
-                        f"已连续 {self._consecutive_failures} 轮扫描出现错误，"
-                        "请检查 moomoo OpenD 是否在线并已登录。"
-                    ),
-                    color=discord.Color.orange(),
-                ))
 
-    def _record_scan_success(self):
-        self._consecutive_failures = 0
-        self._failure_alerted = False
-
-    # ------------------------------------------------------------------
-    # Posting
-    # ------------------------------------------------------------------
-
-    async def _post_anomaly_alert(self, anomaly: dict, underlying_price: float | None):
+    async def _post_event(self, event, profile=None, *, enrich=True):
+        if options_scan.excluded_underlying(event["ticker"]):
+            return
         channel = _alert_channel(self.bot)
         if channel is None:
             return
+        embed = event_embed(event)
+        message = await channel.send(embed=embed)
+        await asyncio.to_thread(options_store.complete_event, event["event_id"])
+        options_pipeline_total.labels(stage="alert", status="sent").inc()
+        if enrich and config.CATALYST_ENABLED:
+            await self._enrich_event(event, message, embed, profile)
+        return message, embed
 
-        label = options_scan.contract_label(anomaly)
-        reasons = options_scan.reason_labels(anomaly["reasons"])
+    async def _enrich_event(self, event, message, embed, profile=None):
+        async with self._research_slots:
+            await self._research_and_edit(event, message, embed, profile)
+
+    async def _research_and_edit(self, event, message, embed, profile=None):
+        start = clock.monotonic()
         try:
-            ai_block = await llm_client.analyze_options_anomaly(
-                contract_label=label,
-                option_type=anomaly["option_type"],
-                signals=reasons,
-                metrics=anomaly,
-                underlying_price=underlying_price,
-            )
-        except Exception as e:
-            print(f"[options] anomaly analysis failed: {e}")
-            ai_block = None
-
-        color = discord.Color.green() if anomaly["option_type"] == "CALL" else discord.Color.red()
-        embed = discord.Embed(title=f"🚨 期权异动 | {label}", color=color)
-        embed.add_field(name="触发信号", value="、".join(reasons) or "—", inline=False)
-
-        stats = [
-            f"成交量 {anomaly['volume']:,}" + (f" / 持仓 {anomaly['open_interest']:,}" if anomaly.get("open_interest") else ""),
-        ]
-        if anomaly.get("vol_oi_ratio") is not None:
-            stats.append(f"量/仓比 {anomaly['vol_oi_ratio']:.1f}")
-        if anomaly.get("vol_zscore") is not None:
-            stats.append(f"成交量 z {anomaly['vol_zscore']:.1f}")
-        if anomaly.get("notional") is not None:
-            stats.append(f"名义成交额(估) ${anomaly['notional']:,.0f}")
-        if anomaly.get("iv") is not None:
-            iv_line = f"IV {anomaly['iv']:.1f}%"
-            if anomaly.get("iv_jump") is not None:
-                iv_line += f" ({anomaly['iv_jump']:+.1f})"
-            stats.append(iv_line)
-        if anomaly.get("dte") is not None:
-            stats.append(f"剩余 {anomaly['dte']}天")
-        if underlying_price is not None:
-            stats.append(f"正股 ${underlying_price:,.2f}")
-        embed.add_field(name="数据", value="\n".join(stats), inline=False)
-
-        if ai_block:
-            embed.add_field(name="🤖 解读", value=ai_block[:1024], inline=False)
-        footer = "名义成交额为 量×价×乘数 估算，非真实大单逐笔数据"
-        if ai_block is None:
-            footer += f"\n{llm_client.FAILURE_NOTICE}"
-        embed.set_footer(text=footer)
-        await channel.send(embed=embed)
-
-    # ------------------------------------------------------------------
-    # Digest: roll up pending L2 items at scheduled times
-    # ------------------------------------------------------------------
+            result = await asyncio.wait_for(catalyst_intelligence.investigate(event, profile),
+                                            timeout=config.CATALYST_TIMEOUT_SECONDS)
+        except Exception as exc:
+            _log.warning("Catalyst enrichment unavailable (%s); base alert already sent", type(exc).__name__)
+            result = {"status": "unavailable", "classification": "unavailable", "evidence_score": None,
+                      "sources": [], "research": {"summary": "AI/search unavailable or budget exhausted; quantitative alert retained."}}
+        result["elapsed_seconds"] = round(clock.monotonic() - start, 3)
+        _log.info("Catalyst ticker=%s status=%s cache_hit=%s elapsed_seconds=%.3f",
+                  event["ticker"], result.get("status"), result.get("cache_hit", False), result["elapsed_seconds"])
+        if event.get("event_id"):
+            await asyncio.to_thread(options_store.save_event_research, event["event_id"], result)
+        try:
+            await message.edit(embed=add_catalyst(embed, result))
+        except Exception:
+            _log.exception("Catalyst message update failed; base alert remains available")
 
     @tasks.loop(time=_DIGEST_TIMES)
     async def flush_digest(self):
-        if not config.MOOMOO_ENABLED or not market_open_today():
-            return
-        await self._post_digest()
+        try:
+            if config.MOOMOO_ENABLED and market_open_today():
+                async with self._scan_lock:
+                    await self._post_digest()
+        except Exception:
+            _log.exception("Options digest failed; pending events retained")
 
     @flush_digest.before_loop
     async def before_flush_digest(self):
         await self.bot.wait_until_ready()
 
     async def _post_digest(self):
-        today = market_today().isoformat()
-        pending = await asyncio.to_thread(options_store.get_pending_digest, today)
+        pending = await asyncio.to_thread(options_store.pending_events, market_now().astimezone(timezone.utc))
         if not pending:
             return
         channel = _alert_channel(self.bot)
         if channel is None:
             return
-
-        lines = []
-        for row in pending:
-            try:
-                sig = json.loads(row["signals_json"])
-            except Exception:
-                sig = {}
-            cp = "C" if sig.get("option_type") == "CALL" else "P"
-            strike = sig.get("strike")
-            strike_str = f"{strike:g}" if strike is not None else "?"
-            reasons = "、".join(options_scan.reason_labels(sig.get("reasons", [])))
-            notional = sig.get("notional")
-            notional_str = f"${notional:,.0f}" if notional is not None else ""
-            lines.append(f"`{row['ticker']} {strike_str}{cp} {sig.get('expiry','')}` — {reasons} {notional_str}".strip())
-
-        embed = discord.Embed(
-            title=f"📋 期权异动摘要（{len(pending)}条）",
-            description="\n".join(lines)[:4096],
-            color=discord.Color.blue(),
-        )
-        await channel.send(embed=embed)
-        await asyncio.to_thread(
-            options_store.mark_digested, [r["contract_code"] for r in pending], today
-        )
-
-    # ------------------------------------------------------------------
-    # Owner commands
-    # ------------------------------------------------------------------
+        for start in range(0, len(pending), 12):
+            batch = pending[start:start + 12]
+            lines = [f"**{e['ticker']}** {e['score']}/100 | {len(e['contracts'])} contracts | "
+                     f"daily activity ${e['premium']:,.0f} | direction {e['directional_bias']}" for e in batch]
+            embed = discord.Embed(title="Unusual Options Digest", description="\n".join(lines), color=discord.Color.blue())
+            embed.set_footer(text="Selected aggregate activity, not confirmed buying or individual large trades.")
+            await channel.send(embed=embed)
+            for event in batch:
+                await asyncio.to_thread(options_store.complete_event, event["event_id"])
 
     @commands.command(name="optionhealth", hidden=True)
     @commands.is_owner()
     async def cmd_option_health(self, ctx):
-        """Owner-only: check moomoo OpenD connectivity."""
-        ok, detail = await asyncio.to_thread(moomoo_client.check_health)
-        await ctx.send(f"{'✅' if ok else '❌'} moomoo: {detail}")
+        if not config.MOOMOO_ENABLED:
+            await ctx.send("Options scanning disabled (settings/options.json: moomoo.enabled).")
+            return
+        try:
+            if config.MOOMOO_TRANSPORT == "rest":
+                detail = await self._rest.health()
+            else:
+                _, detail = await asyncio.to_thread(moomoo_client.check_health)
+            await ctx.send(detail)
+        except Exception as exc:
+            await ctx.send(f"Options health failed: {type(exc).__name__}. Check Railway logs.")
+            _log.warning("Options health failed: %s", exc)
 
     @commands.command(name="optionscan", hidden=True)
     @commands.is_owner()
     async def cmd_option_scan(self, ctx):
-        """Owner-only: fire one full options-flow scan right now."""
         if not config.MOOMOO_ENABLED:
-            await ctx.send("MOOMOO_ENABLED is false — set it in .env and restart.")
+            await ctx.send("Options scanning disabled (settings/options.json: moomoo.enabled).")
             return
-        await ctx.send("Scanning options flow…", delete_after=5)
+        if not _within_market_hours():
+            await ctx.send("Market session closed. Use !optionflow TICKER for a non-persisted snapshot preview.")
+            return
+        await ctx.send("Scanning options activity...")
         await self._run_scan()
-        await ctx.send("Options scan complete.", delete_after=5)
+        await ctx.send("Scan attempted; check the options channel and logs. Empty scans are valid.")
 
     @commands.command(name="optionflow", hidden=True)
     @commands.is_owner()
-    async def cmd_option_flow(self, ctx, ticker: str = None):
-        """Owner-only: scan one ticker on demand. !optionflow AAPL"""
+    async def cmd_option_flow(self, ctx, ticker=None):
+        await self._preview(ctx, ticker)
+
+    @commands.command(name="optionresearch", hidden=True)
+    @commands.is_owner()
+    async def cmd_option_research(self, ctx, ticker=None):
+        if not config.CATALYST_ENABLED:
+            await ctx.send("Catalyst disabled (settings/options.json: catalyst.enabled).")
+            return
+        if not _within_market_hours():
+            await ctx.send("Live research previews require an open market session to avoid stale option activity.")
+            return
+        await self._preview(ctx, ticker, research=True)
+
+    async def _preview(self, ctx, ticker, *, research=False):
         if not config.MOOMOO_ENABLED:
-            await ctx.send("MOOMOO_ENABLED is false — set it in .env and restart.")
+            await ctx.send("Options scanning disabled (settings/options.json: moomoo.enabled).")
             return
-        if ticker is None:
-            await ctx.send("Usage: `!optionflow AAPL`")
+        ticker = (ticker or "").upper()
+        if not re.fullmatch(r"[A-Z][A-Z0-9.]{0,9}", ticker):
+            await ctx.send("Usage: !optionresearch AAPL" if research else "Usage: !optionflow AAPL")
             return
-        ticker = ticker.upper()
-        async with ctx.typing():
-            codes = await self._get_universe(ticker)
-            if not codes:
-                await ctx.send(f"No option universe built for **{ticker}** (check OpenD / permissions).")
-                return
-            underlying_price, snaps = await asyncio.to_thread(
-                moomoo_client.fetch_ticker_snapshots, ticker, codes
-            )
-            today = market_today().isoformat()
-            prior_iv = await asyncio.to_thread(options_store.get_prior_iv_map, ticker, today)
-            vol_baseline = await asyncio.to_thread(options_store.get_volume_baseline, ticker, today)
-            anomalies = options_scan.detect_anomalies(snaps, prior_iv, vol_baseline)
-
-        if not anomalies:
-            await ctx.send(f"**{ticker}**: {len(snaps)} contracts scanned, no anomalies above L2.")
+        if options_scan.excluded_underlying(ticker):
+            await ctx.send(f"{ticker}: index/broad-market ETF options are excluded from this workflow.")
             return
-        lines = [
-            f"`L{a['tier']}` {options_scan.contract_label(a)} — "
-            f"{'、'.join(options_scan.reason_labels(a['reasons']))} "
-            f"(${a['notional']:,.0f})"
-            for a in anomalies[:15]
-        ]
-        await ctx.send(embed=discord.Embed(
-            title=f"期权异动: {ticker}",
-            description="\n".join(lines),
-            color=discord.Color.blurple(),
-        ))
+        async with self._scan_lock:
+            async with ctx.typing():
+                events, coverage, count = await self._scan([ticker], persist=False)
+        if not events:
+            await ctx.send(f"{ticker}: {count} candidates scanned, none above L2. Complete coverage: {coverage['complete']}.")
+            return
+        embed = event_embed(events[0])
+        if research:
+            embed.add_field(name="Manual Research Preview", value="Owner-requested L2+ candidate; not an automatic L3 alert.", inline=False)
+        if not _within_market_hours():
+            embed.add_field(name="Snapshot Preview", value="Market closed; this may be the previous session's activity.", inline=False)
+        message = await ctx.send(embed=embed)
+        if research:
+            await self._enrich_event(events[0], message, embed, coverage["profiles"].get(ticker))
 
 
-async def setup(bot: commands.Bot):
+async def setup(bot):
     await bot.add_cog(OptionsFlow(bot))

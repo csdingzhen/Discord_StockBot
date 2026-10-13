@@ -32,6 +32,9 @@ def init_db():
     conn = get_connection()
     try:
         conn.executescript(_SCHEMA)
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(sec_filings)")}
+        if "analyzed_at" not in columns:
+            conn.execute("ALTER TABLE sec_filings ADD COLUMN analyzed_at TEXT")
         conn.commit()
     finally:
         conn.close()
@@ -77,8 +80,8 @@ def save_analysis(accession_number: str, analysis_json: str):
     conn = get_connection()
     try:
         conn.execute(
-            "UPDATE sec_filings SET analysis_json = ?, analyzed = 1 WHERE accession_number = ?",
-            (analysis_json, accession_number),
+            "UPDATE sec_filings SET analysis_json = ?, analyzed = 1, analyzed_at = ? WHERE accession_number = ?",
+            (analysis_json, datetime.now(timezone.utc).isoformat(), accession_number),
         )
         conn.commit()
     finally:

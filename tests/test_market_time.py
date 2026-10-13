@@ -67,7 +67,8 @@ class MarketDateConsumersTests(unittest.TestCase):
                                       ("2026-07-06T13:30:00+00:00", True),
                                       ("2026-01-05T14:30:00+00:00", True)]:
             now = datetime.fromisoformat(instant).astimezone(market_time.ET)
-            with self.subTest(instant=instant), patch.object(options_flow, "market_now", return_value=now):
+            with self.subTest(instant=instant), patch.object(options_flow, "market_now", return_value=now), \
+                    patch.object(scheduler, "market_today", return_value=now.date()):
                 self.assertEqual(options_flow._within_market_hours(), within_hours)
 
     def test_weekly_sources_use_same_et_week(self):
@@ -138,12 +139,13 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         cog._universe_date = "2026-07-06"
         now = datetime(2026, 7, 7, 0, 30, tzinfo=timezone.utc).astimezone(market_time.ET)
         with patch.object(market_time, "market_now", return_value=now), \
+                patch.object(options_flow, "market_now", return_value=now), \
                 patch.object(moomoo_client, "build_universe") as build, \
-                patch.object(options_flow.options_store, "get_pending_digest", return_value=[]) as pending:
+                patch.object(options_flow.options_store, "pending_events", return_value=[]) as pending:
             self.assertEqual(await cog._get_universe("AAPL"), ["cached-contract"])
             await cog._post_digest()
         build.assert_not_called()
-        pending.assert_called_once_with("2026-07-06")
+        pending.assert_called_once_with(now.astimezone(timezone.utc))
 
     async def test_actual_discord_loops_follow_dst(self):
         loops = [
